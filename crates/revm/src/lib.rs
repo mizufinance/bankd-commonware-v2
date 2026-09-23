@@ -7,6 +7,7 @@
 #[cfg(not(test))]
 use tracing as _;
 
+pub mod bankd;
 mod common;
 pub use common::{TempoStateAccess, TempoTx};
 pub mod error;
@@ -23,7 +24,9 @@ mod tx;
 pub use error::TempoInvalidTransaction;
 pub use evm::TempoEvm;
 pub use fee_manager::{FeeTokenResolver, ProtocolFeeContext, ProtocolFeeManager, TempoFeeManager};
-pub use handler::{ValidationContext, calculate_aa_batch_intrinsic_gas};
+pub use handler::{
+    FEE_ESCROW_ADDRESS, NATIVE_FEE_TOKEN, ValidationContext, calculate_aa_batch_intrinsic_gas,
+};
 pub use revm::interpreter::instructions::utility::IntoAddress;
 pub use tempo_primitives::TempoBlockEnv;
 pub use tx::{ExecutionContext, TempoBatchCallEnv, TempoTxEnv};
