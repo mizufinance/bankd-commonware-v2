@@ -12,6 +12,9 @@
 #   IBC_MODE=hub|spoke|none   adapter mode (default hub), none skips the predeploy
 #   IBC_RELAYERS=0xA,0xB      granted RELAYER_ROLE on the router
 #   IBC_HUB_CLIENTS=bankd-hub spoke only: client ids the adapter trusts as the hub
+#   IBC_LEGACY_DENOMS=a,b     hub only: legacy traces treated as native ujuno coming home
+#   IBC_SEED_ESCROW=client=wei hub only: escrow seeded in the adapter (and funded with the same wei)
+#   GENESIS_ALLOC=file.json   json {"0xaddr": "0xhexWei"} merged into genesis balances (migration)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -75,6 +78,8 @@ up() {
     fi
     ibc=(--ibc-predeploy --ibc-mode "$IBC_MODE" --ibc-artifacts "$ROOT/contracts/out")
     [[ -n "${IBC_RELAYERS:-}" ]] && ibc+=(--ibc-relayers "$IBC_RELAYERS")
+    [[ -n "${IBC_LEGACY_DENOMS:-}" ]] && ibc+=(--ibc-legacy-denoms "$IBC_LEGACY_DENOMS")
+    [[ -n "${IBC_SEED_ESCROW:-}" ]] && ibc+=(--ibc-seed-escrow "$IBC_SEED_ESCROW")
     [[ "$IBC_MODE" == spoke ]] && ibc+=(--ibc-hub-clients "${IBC_HUB_CLIENTS:-bankd-hub}")
   fi
 
@@ -86,6 +91,19 @@ up() {
     --no-extra-tokens --no-pairwise-liquidity ${ibc[@]+"${ibc[@]}"} >"$DIR.gen.log" 2>&1 \
     || { cat "$DIR.gen.log" >&2; exit 1; }
   mv "$DIR.gen.log" "$DIR/generate.log"
+  if [[ -n "${GENESIS_ALLOC:-}" ]]; then
+    python3 - "$DIR/genesis.json" "$GENESIS_ALLOC" <<'PY'
+import json, sys
+gpath, apath = sys.argv[1:3]
+g = json.load(open(gpath))
+existing = {k.lower() for k in g["alloc"]}
+for addr, wei in json.load(open(apath)).items():
+    key = "0x" + addr.lower().removeprefix("0x")
+    assert key not in existing, f"{addr} already in genesis alloc"
+    g["alloc"][key] = {"balance": wei}
+json.dump(g, open(gpath, "w"), indent=2)
+PY
+  fi
   printf '%s\n' "$SECRET" >"$DIR/consensus.secret"
 
   launch

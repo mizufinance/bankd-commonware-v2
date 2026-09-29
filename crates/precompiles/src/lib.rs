@@ -21,6 +21,7 @@ pub mod receive_policy_guard;
 pub mod signature_verifier;
 pub mod stablecoin_dex;
 pub mod storage_credits;
+pub mod tendermint_verifier;
 pub mod tip20;
 pub mod tip20_channel_reserve;
 pub mod tip20_factory;
@@ -37,7 +38,7 @@ pub mod test_util;
 use crate::{
     account_keychain::AccountKeychain,
     address_registry::AddressRegistry,
-    bankd::{Authority, BankSend, Compliance, Native, Shield},
+    bankd::{Authority, BankSend, Compliance, Cw, Native, Shield},
     current_committee::CurrentCommittee,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
@@ -45,6 +46,7 @@ use crate::{
     stablecoin_dex::StablecoinDEX,
     storage::{StorageCtx, actions::StorageActions},
     storage_credits::{NonCreditableSlots, StorageCredits},
+    tendermint_verifier::TendermintVerifier,
     tip_fee_manager::TipFeeManager,
     tip20::TIP20Token,
     tip20_channel_reserve::TIP20ChannelReserve,
@@ -72,13 +74,13 @@ use revm::{
 
 pub use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ADDRESS_REGISTRY_ADDRESS, AUTHORITY_ADDRESS, BANK_SEND_ADDRESS,
-    COMPLIANCE_ADDRESS, CURRENT_COMMITTEE_ADDRESS, DEFAULT_FEE_TOKEN, NATIVE_ADDRESS,
+    COMPLIANCE_ADDRESS, CURRENT_COMMITTEE_ADDRESS, CW_ADDRESS, DEFAULT_FEE_TOKEN, NATIVE_ADDRESS,
     NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, SHIELD_ADDRESS,
     SIGNATURE_VERIFIER_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
-    SYSTEM_PRECOMPILES, TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-    TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, VALIDATOR_CONFIG_ADDRESS,
-    VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS,
-    ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    SYSTEM_PRECOMPILES, TENDERMINT_VERIFIER_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS,
+    ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
 };
 
 // Re-export storage layout helpers for read-only contexts (e.g., pool validation)
@@ -271,6 +273,10 @@ pub fn extend_tempo_precompiles(
             Some(BankSend::create_precompile(&env))
         } else if *address == SHIELD_ADDRESS {
             Some(Shield::create_precompile(&env))
+        } else if *address == CW_ADDRESS {
+            Some(Cw::create_precompile(&env))
+        } else if *address == TENDERMINT_VERIFIER_ADDRESS && env.cfg.spec.is_t14() {
+            Some(TendermintVerifier::create_precompile(&env))
         } else {
             None
         }
@@ -445,6 +451,20 @@ impl Shield {
     /// `msg.value`, since `deposit` is payable.
     pub fn create_precompile(env: &PrecompileEnv) -> DynPrecompile {
         tempo_precompile!("Shield", env: env, |input| { Self::new().with_value(input.value) })
+    }
+}
+
+impl Cw {
+    /// Creates the EVM precompile for this type.
+    pub fn create_precompile(env: &PrecompileEnv) -> DynPrecompile {
+        tempo_precompile!("Cw", env: env, |input| { Self::new() })
+    }
+}
+
+impl TendermintVerifier {
+    /// Creates the EVM precompile for this type.
+    pub fn create_precompile(env: &PrecompileEnv) -> DynPrecompile {
+        tempo_precompile!("TendermintVerifier", env: env, |input| { Self::new() })
     }
 }
 
@@ -1353,6 +1373,233 @@ mod tests {
         assert!(execute(TempoHardfork::T11));
         assert!(execute(TempoHardfork::T12));
         assert!(!execute(TempoHardfork::T13));
+    }
+
+    #[test]
+    fn test_tendermint_verifier_registered_at_t14_only() {
+        let activation = SYSTEM_PRECOMPILES
+            .iter()
+            .find_map(|(a, fork)| (*a == TENDERMINT_VERIFIER_ADDRESS).then_some(*fork))
+            .expect("TendermintVerifier must be listed in SYSTEM_PRECOMPILES");
+        assert_eq!(activation, TempoHardfork::T14);
+
+        for (spec, active) in [(TempoHardfork::T13, false), (TempoHardfork::T14, true)] {
+            let mut cfg = CfgEnv::<TempoHardfork>::default();
+            cfg.set_spec_and_mainnet_gas_params(spec);
+            assert_eq!(
+                test_tempo_precompiles(&cfg)
+                    .get(&TENDERMINT_VERIFIER_ADDRESS)
+                    .is_some(),
+                active,
+                "unexpected TendermintVerifier activation at {spec:?}"
+            );
+        }
+    }
+
+    /// Runs the real registered precompile through the EVM, including gas metering.
+    #[test]
+    fn test_tendermint_verifier_end_to_end_in_evm() {
+        use tempo_contracts::precompiles::ITendermintVerifier as I;
+        use tempo_tendermint_verifier::fixtures;
+
+        let u = fixtures::update();
+        let calldata = I::verifyUpdateCall {
+            params: I::Params {
+                chainId: u.params.chain_id.clone(),
+                trustNumerator: u.params.trust_numerator,
+                trustDenominator: u.params.trust_denominator,
+                trustingPeriod: u.params.trusting_period_secs,
+                unbondingPeriod: u.params.unbonding_period_secs,
+                maxClockDrift: u.params.max_clock_drift_secs,
+            },
+            trusted: I::ConsensusState {
+                timestamp: u.trusted.timestamp_ns,
+                root: u.trusted.root.into(),
+                nextValidatorsHash: u.trusted.next_validators_hash.into(),
+            },
+            header: u.header.clone().into(),
+            nowSeconds: (u.now_ns / 1_000_000_000) as u64,
+        }
+        .abi_encode();
+
+        let execute = |spec, gas_limit| {
+            let mut cfg = CfgEnv::<TempoHardfork>::default();
+            cfg.set_spec_and_mainnet_gas_params(spec);
+            let mut evm = TempoEvmFactory::default().create_evm(
+                CacheDB::new(EmptyDB::new()),
+                EvmEnv {
+                    cfg_env: cfg,
+                    block_env: TempoBlockEnv::default(),
+                },
+            );
+            evm.transact_raw(TempoTxEnv {
+                inner: TxEnv {
+                    caller: Address::repeat_byte(0x77),
+                    gas_price: 0,
+                    gas_limit,
+                    kind: TxKind::Call(TENDERMINT_VERIFIER_ADDRESS),
+                    data: calldata.clone().into(),
+                    ..Default::default()
+                },
+                is_system_tx: false,
+                ..Default::default()
+            })
+            .unwrap()
+            .result
+        };
+
+        use revm::context::result::{ExecutionResult, Output};
+        let ExecutionResult::Success {
+            output: Output::Call(out),
+            gas,
+            ..
+        } = execute(TempoHardfork::T14, 10_000_000)
+        else {
+            panic!("expected success at T14");
+        };
+        let ret = I::verifyUpdateCall::abi_decode_returns(&out).unwrap();
+        assert!(ret.newHeight.revisionHeight > ret.trustedHeight.revisionHeight);
+        assert!(
+            gas.tx_gas_used() > 100_000,
+            "verification gas must be charged, got {gas:?}"
+        );
+
+        // Not enough gas for the metered cost.
+        assert!(!matches!(
+            execute(TempoHardfork::T14, 100_000),
+            ExecutionResult::Success { .. }
+        ));
+        // Before T14 the address is a plain empty account, no verification happens.
+        match execute(TempoHardfork::T13, 10_000_000) {
+            ExecutionResult::Success {
+                output: Output::Call(out),
+                ..
+            } => assert!(out.is_empty()),
+            other => panic!("unexpected pre-T14 result: {other:?}"),
+        }
+    }
+
+    /// storeCode, instantiate, execute, query of the counter contract through the real EVM.
+    #[test]
+    fn test_cw_counter_end_to_end_in_evm() {
+        use revm::{
+            DatabaseCommit,
+            context::result::{ExecutionResult, Output},
+        };
+        use tempo_contracts::precompiles::ICw;
+
+        let mut cfg = CfgEnv::<TempoHardfork>::default();
+        cfg.set_spec_and_mainnet_gas_params(TempoHardfork::T13);
+        let mut db = CacheDB::new(EmptyDB::new());
+        db.insert_account_info(
+            CW_ADDRESS,
+            AccountInfo {
+                nonce: 1,
+                code: Some(Bytecode::new_legacy(bytes!("ef"))),
+                ..Default::default()
+            },
+        );
+        let mut evm = TempoEvmFactory::default().create_evm(
+            db,
+            EvmEnv {
+                cfg_env: cfg,
+                block_env: TempoBlockEnv::default(),
+            },
+        );
+        let sender = Address::repeat_byte(0x77);
+        let mut nonce = 0;
+        let mut send = |data: Vec<u8>, gas_limit: u64| {
+            nonce += 1;
+            let res = evm
+                .transact_raw(TempoTxEnv {
+                    inner: TxEnv {
+                        caller: sender,
+                        nonce: nonce - 1,
+                        gas_price: 0,
+                        gas_limit,
+                        kind: TxKind::Call(CW_ADDRESS),
+                        data: data.into(),
+                        ..Default::default()
+                    },
+                    is_system_tx: false,
+                    ..Default::default()
+                })
+                .unwrap();
+            evm.db_mut().commit(res.state);
+            match res.result {
+                ExecutionResult::Success {
+                    output: Output::Call(out),
+                    gas,
+                    ..
+                } => (out, gas.tx_gas_used()),
+                other => panic!("call failed: {other:?}"),
+            }
+        };
+
+        let wasm = include_bytes!("../../../cw-contracts/counter/artifacts/cw_counter.wasm");
+        let mut code_id = 0;
+        for chunk in wasm.chunks(10_000) {
+            let (out, gas) = send(
+                ICw::uploadCodeCall {
+                    codeId: code_id,
+                    chunk: chunk.to_vec().into(),
+                }
+                .abi_encode(),
+                16_000_000,
+            );
+            code_id = ICw::uploadCodeCall::abi_decode_returns(&out).unwrap();
+            println!("uploadCode chunk gas: {gas}");
+        }
+        send(
+            ICw::finalizeCodeCall { codeId: code_id }.abi_encode(),
+            16_000_000,
+        );
+        assert_eq!(code_id, 1);
+
+        let (out, gas) = send(
+            ICw::instantiateCall {
+                codeId: code_id,
+                msg: br#"{"count":5}"#.to_vec().into(),
+            }
+            .abi_encode(),
+            10_000_000,
+        );
+        let inst = ICw::instantiateCall::abi_decode_returns(&out).unwrap();
+        println!("instantiate gas: {gas}");
+        assert_eq!(inst.contractAddress[..4], [0xC0, 0xDE, 0xC0, 0xDE]);
+
+        let (out, gas) = send(
+            ICw::executeCall {
+                contractAddress: inst.contractAddress,
+                msg: br#"{"increment":{}}"#.to_vec().into(),
+            }
+            .abi_encode(),
+            10_000_000,
+        );
+        let data = ICw::executeCall::abi_decode_returns(&out).unwrap();
+        println!("execute gas: {gas}");
+        assert_eq!(data.as_ref(), 6u64.to_be_bytes());
+
+        let (out, gas) = send(
+            ICw::queryCall {
+                contractAddress: inst.contractAddress,
+                msg: br#"{"get_count":{}}"#.to_vec().into(),
+            }
+            .abi_encode(),
+            10_000_000,
+        );
+        let res = ICw::queryCall::abi_decode_returns(&out).unwrap();
+        println!("query gas: {gas}");
+        assert_eq!(res.as_ref(), br#"{"count":"6"}"#);
+
+        let (out, _) = send(
+            ICw::isContractCall {
+                account: inst.contractAddress,
+            }
+            .abi_encode(),
+            1_000_000,
+        );
+        assert!(ICw::isContractCall::abi_decode_returns(&out).unwrap());
     }
 
     #[test]

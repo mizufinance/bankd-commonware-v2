@@ -55,12 +55,13 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS,
     account_keychain::AccountKeychain,
     address_registry::AddressRegistry,
-    bankd::{Authority, BankSend, Compliance, Native, Shield, native::INative},
+    bankd::{Authority, BankSend, Compliance, Cw, Native, Shield, native::INative},
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
     signature_verifier::SignatureVerifier,
     stablecoin_dex::StablecoinDEX,
     storage::{ContractStorage, StorageActions, StorageCtx},
+    tendermint_verifier::TendermintVerifier,
     tip_fee_manager::{IFeeManager, TipFeeManager},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
@@ -171,6 +172,16 @@ pub(crate) struct GenesisArgs {
     #[arg(long, value_delimiter = ',', requires = "ibc_predeploy")]
     ibc_hub_clients: Vec<String>,
 
+    /// bankd: hub only, legacy denom traces (e.g. transfer/channel-0/ujuno) the adapter treats as
+    /// native ujuno returning home.
+    #[arg(long, value_delimiter = ',', requires = "ibc_predeploy")]
+    ibc_legacy_denoms: Vec<String>,
+
+    /// bankd: hub only, `<client>=<wei>` escrow seeded in the adapter, which is funded with the same
+    /// wei. Repeatable.
+    #[arg(long, value_delimiter = ',', value_parser = parse_seed_escrow, requires = "ibc_predeploy")]
+    ibc_seed_escrow: Vec<(String, U256)>,
+
     /// Disable creating Alpha/Beta/ThetaUSD tokens.
     #[arg(long)]
     no_extra_tokens: bool,
@@ -254,6 +265,10 @@ pub(crate) struct GenesisArgs {
     /// T13 hardfork activation time.
     #[arg(long, default_value = "0")]
     t13_time: u64,
+
+    /// T14 hardfork activation time (TendermintVerifier precompile).
+    #[arg(long, default_value = "0")]
+    t14_time: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -516,7 +531,12 @@ impl GenesisArgs {
             native_minters.push(bankd_ibc::ADAPTER);
         }
         println!("Initializing bankd modules (authority owner: {validator_admin})");
-        initialize_bankd_modules(validator_admin, &native_minters, &mut evm)?;
+        initialize_bankd_modules(
+            validator_admin,
+            &native_minters,
+            self.t14_time == 0,
+            &mut evm,
+        )?;
 
         println!("Initializing TIP20 registry");
         initialize_address_registry(&mut evm)?;
@@ -627,6 +647,8 @@ impl GenesisArgs {
                     owner: validator_admin,
                     relayers: &self.ibc_relayers,
                     hub_clients: &self.ibc_hub_clients,
+                    legacy_denoms: &self.ibc_legacy_denoms,
+                    seed_escrow: &self.ibc_seed_escrow,
                 },
                 self.chain_id,
             )?;
@@ -736,6 +758,9 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("t13Time".to_string(), self.t13_time)?;
+        chain_config
+            .extra_fields
+            .insert_value("t14Time".to_string(), self.t14_time)?;
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -769,6 +794,14 @@ impl GenesisArgs {
 
         Ok((genesis, consensus_config))
     }
+}
+
+fn parse_seed_escrow(s: &str) -> Result<(String, U256), String> {
+    let (client, wei) = s.split_once('=').ok_or("expected <client>=<wei>")?;
+    Ok((
+        client.to_string(),
+        wei.parse::<U256>().map_err(|e| e.to_string())?,
+    ))
 }
 
 fn insert_zone_state_at_genesis(
@@ -1110,6 +1143,7 @@ fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
 fn initialize_bankd_modules(
     owner: Address,
     minters: &[Address],
+    t14_active: bool,
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
 ) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
@@ -1134,6 +1168,10 @@ fn initialize_bankd_modules(
             }
             Compliance::new().initialize()?;
             BankSend::new().initialize()?;
+            if t14_active {
+                TendermintVerifier::new().initialize()?;
+            }
+            Cw::new().initialize()?;
             Shield::new().initialize()
         },
     )?;
