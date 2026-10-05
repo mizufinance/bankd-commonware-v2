@@ -6,16 +6,13 @@ use core::num::NonZeroU64;
 use revm::context::{
     Transaction, TxEnv,
     either::Either,
-    result::InvalidTransaction,
     transaction::{
         AccessList, AccessListItem, RecoveredAuthority, RecoveredAuthorization, SignedAuthorization,
     },
 };
 use tempo_primitives::{
     AASigned, TempoSignature, TempoTransaction, TempoTxEnvelope,
-    transaction::{
-        Call, RecoveredTempoAuthorization, SignedKeyAuthorization, calc_gas_balance_spending,
-    },
+    transaction::{Call, RecoveredTempoAuthorization, SignedKeyAuthorization},
 };
 
 /// Tempo transaction environment for AA features.
@@ -252,21 +249,8 @@ impl Transaction for TempoTxEnv {
         self.inner.max_priority_fee_per_gas()
     }
 
-    fn max_balance_spending(&self) -> Result<U256, InvalidTransaction> {
-        calc_gas_balance_spending(self.gas_limit(), self.max_fee_per_gas())
-            .checked_add(self.value())
-            .ok_or(InvalidTransaction::OverflowPaymentInTransaction)
-    }
-
-    fn effective_balance_spending(
-        &self,
-        base_fee: u128,
-        _blob_price: u128,
-    ) -> Result<U256, InvalidTransaction> {
-        calc_gas_balance_spending(self.gas_limit(), self.effective_gas_price(base_fee))
-            .checked_add(self.value())
-            .ok_or(InvalidTransaction::OverflowPaymentInTransaction)
-    }
+    // bankd: max/effective balance spending use revm's defaults, since native BRL gas is
+    // wei-denominated and not scaled down to 6-decimal TIP-20 units.
 }
 
 impl TransactionEnvMut for TempoTxEnv {
@@ -428,6 +412,30 @@ impl FromRecoveredTx<TempoTxEnvelope> for TempoTxEnv {
                 ..Default::default()
             },
             TempoTxEnvelope::AA(tx) => Self::from_recovered_tx(tx, sender),
+            // The block executor hands 0x77 to shieldd before the EVM, so this plain call env
+            // only matters to prewarming and tracing. Zero price keeps it from charging anyone.
+            TempoTxEnvelope::Shielded(inner) => Self {
+                inner: TxEnv {
+                    tx_type: tempo_primitives::SHIELDED_TX_TYPE_ID,
+                    caller: sender,
+                    gas_limit: tempo_primitives::SHIELDED_TX_GAS,
+                    gas_price: 0,
+                    kind: alloy_primitives::TxKind::Call(
+                        tempo_primitives::transaction::SHIELD_ADDRESS,
+                    ),
+                    value: alloy_primitives::U256::ZERO,
+                    data: inner.inner().input.clone(),
+                    nonce: 0,
+                    chain_id: None,
+                    gas_priority_fee: Some(0),
+                    ..Default::default()
+                },
+                execution_context: ExecutionContext::Transaction {
+                    tx_hash: *tx.tx_hash(),
+                },
+                unique_tx_identifier: Some(tx.unique_tx_identifier(sender)),
+                ..Default::default()
+            },
         }
     }
 }
@@ -471,7 +479,7 @@ mod tests {
     use tempo_primitives::{
         TempoTxEnvelope,
         transaction::{
-            Call, calc_gas_balance_spending,
+            Call,
             tempo_transaction::TEMPO_EXPIRING_NONCE_KEY,
             tt_signature::{PrimitiveSignature, TempoSignature},
             tt_signed::AASigned,
@@ -1094,10 +1102,13 @@ mod tests {
             value in arb_u256(),
         ) {
             let tx_env = make_tx_env(gas_limit, max_fee_per_gas, value);
-            let gas_spending = calc_gas_balance_spending(gas_limit, max_fee_per_gas);
+            // bankd: unscaled wei, matching revm's default (u128 gas cost).
             let result = tx_env.max_balance_spending();
 
-            match gas_spending.checked_add(value) {
+            match (gas_limit as u128)
+                .checked_mul(max_fee_per_gas)
+                .and_then(|gas| alloy_primitives::U256::from(gas).checked_add(value))
+            {
                 Some(expected) => prop_assert_eq!(result, Ok(expected)),
                 None => prop_assert_eq!(result, Err(InvalidTransaction::OverflowPaymentInTransaction)),
             }
@@ -1154,7 +1165,9 @@ mod tests {
 
             // For EIP-1559: effective_gas_price = min(max_fee, 0 + priority_fee) = min(max_fee, priority_fee)
             let effective_price = std::cmp::min(max_fee_per_gas, priority_fee);
-            let expected_gas_spending = calc_gas_balance_spending(gas_limit, effective_price);
+            // bankd: unscaled wei, since native BRL gas isn't scaled to TIP-20 units.
+            let expected_gas_spending =
+                alloy_primitives::U256::from(gas_limit) * alloy_primitives::U256::from(effective_price);
             let expected = expected_gas_spending.checked_add(alloy_primitives::U256::from(value));
 
             match expected {

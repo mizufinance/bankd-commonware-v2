@@ -1,3 +1,4 @@
+use crate::bankd_ibc::{self, IbcMode};
 use alloy::{
     genesis::{ChainConfig, Genesis, GenesisAccount},
     primitives::{Address, U256, address},
@@ -54,6 +55,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS,
     account_keychain::AccountKeychain,
     address_registry::AddressRegistry,
+    bankd::{Authority, BankSend, Compliance, Native, Shield, native::INative},
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
     signature_verifier::SignatureVerifier,
@@ -88,6 +90,10 @@ pub(crate) struct GenesisArgs {
     /// Chain ID
     #[arg(long, short, default_value = "1337")]
     chain_id: u64,
+
+    /// bankd: native BRL (wei, 18 decimals) given to each generated account. Defaults to 1M BRL.
+    #[arg(long, default_value = "1000000000000000000000000")]
+    native_balance: U256,
 
     /// Genesis block gas limit
     #[arg(long, default_value_t = 500_000_000)]
@@ -137,6 +143,33 @@ pub(crate) struct GenesisArgs {
     /// Must match the number of validators if provided.
     #[arg(long, value_delimiter = ',')]
     validator_addresses: Vec<Address>,
+
+    /// bankd: addresses allowed to mint/burn native BRL from genesis (e.g. the ICS20 native
+    /// adapter on spoke chains).
+    #[arg(long, value_delimiter = ',')]
+    native_minters: Vec<Address>,
+
+    /// bankd: predeploy the IBC contracts (AccessManager, ICS26Router proxy, ICS20 native
+    /// adapter) at fixed addresses, owned by the Authority owner. Needs `forge build` output.
+    #[arg(long)]
+    ibc_predeploy: bool,
+
+    /// bankd: ICS20 native adapter mode. A spoke adapter is also made a Native minter.
+    #[arg(long, value_enum, default_value = "hub", requires = "ibc_predeploy")]
+    ibc_mode: IbcMode,
+
+    /// bankd: forge `out/` directory the IBC contract bytecode is read from.
+    #[arg(long, default_value = "contracts/out", requires = "ibc_predeploy")]
+    ibc_artifacts: PathBuf,
+
+    /// bankd: relayer addresses granted RELAYER_ROLE on the ICS26Router.
+    #[arg(long, value_delimiter = ',', requires = "ibc_predeploy")]
+    ibc_relayers: Vec<Address>,
+
+    /// bankd: spoke only, local client ids the adapter trusts as the hub route (e.g. bankd-hub).
+    /// The clients themselves are added after genesis, see scripts/bankd/connect.sh.
+    #[arg(long, value_delimiter = ',', requires = "ibc_predeploy")]
+    ibc_hub_clients: Vec<String>,
 
     /// Disable creating Alpha/Beta/ThetaUSD tokens.
     #[arg(long)]
@@ -477,6 +510,14 @@ impl GenesisArgs {
         println!("Initializing account keychain");
         initialize_account_keychain(&mut evm)?;
 
+        // The spoke adapter mints native BRL, so it joins the genesis minters.
+        let mut native_minters = self.native_minters.clone();
+        if self.ibc_predeploy && self.ibc_mode == IbcMode::Spoke {
+            native_minters.push(bankd_ibc::ADAPTER);
+        }
+        println!("Initializing bankd modules (authority owner: {validator_admin})");
+        initialize_bankd_modules(validator_admin, &native_minters, &mut evm)?;
+
         println!("Initializing TIP20 registry");
         initialize_address_registry(&mut evm)?;
 
@@ -572,6 +613,37 @@ impl GenesisArgs {
         );
 
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, &mut genesis_alloc);
+
+        // bankd: gas is native BRL, so fund the generated accounts with it.
+        for address in &addresses {
+            genesis_alloc.entry(*address).or_default().balance = self.native_balance;
+        }
+
+        if self.ibc_predeploy {
+            let accounts = bankd_ibc::predeploy(
+                bankd_ibc::PredeployInput {
+                    artifacts: &self.ibc_artifacts,
+                    mode: self.ibc_mode,
+                    owner: validator_admin,
+                    relayers: &self.ibc_relayers,
+                    hub_clients: &self.ibc_hub_clients,
+                },
+                self.chain_id,
+            )?;
+            println!(
+                "IBC predeploy ({:?}): router {} adapter {} access manager {}",
+                self.ibc_mode,
+                bankd_ibc::ROUTER,
+                bankd_ibc::ADAPTER,
+                bankd_ibc::ACCESS_MANAGER
+            );
+            for (addr, account) in accounts {
+                eyre::ensure!(
+                    genesis_alloc.insert(addr, account).is_none(),
+                    "IBC predeploy address {addr} already in alloc"
+                );
+            }
+        }
 
         genesis_alloc.insert(
             HISTORY_STORAGE_ADDRESS,
@@ -1028,6 +1100,42 @@ fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
         &ctx.tx,
         StorageActions::disabled(),
         || NonceManager::new().initialize(),
+    )?;
+
+    Ok(())
+}
+
+/// Initializes the bankd precompiles. `owner` becomes the Authority owner every admin call
+/// checks against.
+fn initialize_bankd_modules(
+    owner: Address,
+    minters: &[Address],
+    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
+) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || -> tempo_precompiles::Result<()> {
+            Authority::new().initialize(owner)?;
+            let mut native = Native::new();
+            native.initialize()?;
+            for &minter in minters {
+                native.set_minter(
+                    owner,
+                    INative::setMinterCall {
+                        minter,
+                        allowed: true,
+                    },
+                )?;
+            }
+            Compliance::new().initialize()?;
+            BankSend::new().initialize()?;
+            Shield::new().initialize()
+        },
     )?;
 
     Ok(())

@@ -436,6 +436,11 @@ impl TempoPooledTransaction {
                 .resolved_fee_token()
                 .unwrap_or_else(|| self.inner().fee_token().unwrap_or(DEFAULT_FEE_TOKEN));
             let fee_payer = self.fee_payer().ok()?;
+            // bankd: native BRL gas has no TIP-20 balance slot, and no TIP-20 balance update
+            // ever keys on the native placeholder token, so any slot works here.
+            if !tempo_primitives::TempoAddressExt::is_tip20(&fee_token) {
+                return Some((fee_token, U256::from_be_slice(fee_payer.as_slice())));
+            }
             let slot = TIP20Token::from_address_unchecked(fee_token).balances[fee_payer].slot();
             Some((fee_token, slot))
         })
@@ -599,6 +604,10 @@ pub enum TempoPoolTransactionError {
     #[error("Tempo Transaction with subblock nonce key prefix aren't supported in the pool")]
     SubblockNonceKey,
 
+    /// A shielded (0x77) transaction failed shieldd's proof, fee or nullifier checks.
+    #[error("shielded transaction rejected: {0}")]
+    ShieldedRejected(String),
+
     /// An AA transaction has too many Tempo authorizations.
     ///
     /// Thrown during pool admission when the AA transaction's authorization list
@@ -752,6 +761,8 @@ impl PoolTransactionError for TempoPoolTransactionError {
             | Self::KeyAuthorizationExpired { .. }
             | Self::AddressCheck { .. }
             | Self::Keychain(_) => false,
+            // Shieldd state moves (spent nullifiers, anchors), so don't penalize the peer.
+            Self::ShieldedRejected(_) => false,
             Self::SubblockNonceKey
             | Self::TooManyAuthorizations { .. }
             | Self::TooManyCalls { .. }
