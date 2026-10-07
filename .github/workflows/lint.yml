@@ -125,7 +125,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust # zizmor: ignore[self-repository] -- actionlint does not support $/ action references yet
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-08-21
       - name: Build documentation
         run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:

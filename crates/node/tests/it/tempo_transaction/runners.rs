@@ -1928,11 +1928,7 @@ pub(super) async fn run_fee_payer_cosign_scenario<E: TestEnv>(env: &mut E) -> ey
     let user_signer = PrivateKeySigner::random();
     let user_addr = user_signer.address();
 
-    let fee_payer_balance_before =
-        tempo_precompiles::tip20::ITIP20::new(DEFAULT_FEE_TOKEN, env.provider())
-            .balanceOf(fee_payer_addr)
-            .call()
-            .await?;
+    let fee_payer_balance_before = env.provider().get_balance(fee_payer_addr).await?;
 
     let mut tx = create_basic_aa_tx(
         chain_id,
@@ -1978,7 +1974,6 @@ pub(super) async fn run_fee_payer_cosign_scenario<E: TestEnv>(env: &mut E) -> ey
 
     let fee_payer_ctx = FeePayerContext {
         addr: fee_payer_addr,
-        token: DEFAULT_FEE_TOKEN,
         balance_before: fee_payer_balance_before,
     };
     assert_fee_payer_spent(env.provider(), fee_payer_ctx, &receipt).await?;

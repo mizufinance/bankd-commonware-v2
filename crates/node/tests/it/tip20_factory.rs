@@ -27,9 +27,9 @@ async fn test_create_token() -> eyre::Result<()> {
     let currency = "USD".to_string();
     let salt = B256::random();
 
-    // Ensure the native account balance is zero
+    // The creator needs native BRL for Bankd gas.
     let balance = provider.get_account_info(caller).await?.balance;
-    assert_eq!(balance, U256::ZERO);
+    assert!(balance > U256::ZERO);
     let receipt = factory
         .createToken_0(
             "Test".to_string(),

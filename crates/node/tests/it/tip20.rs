@@ -776,12 +776,9 @@ async fn test_tip20_rewards() -> eyre::Result<()> {
     Ok(())
 }
 
-/// E2E test: Fee collection fails when the user's fee token is already paused.
-/// Also tests that a transaction which pauses a token can complete successfully
-/// (because transfer_fee_post_tx is allowed even when paused for refunds),
-/// and subsequent transactions fail at fee collection.
+/// Pausing a TIP-20 token blocks its transfers but does not block native BRL gas payment.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_tip20_pause_blocks_fee_collection() -> eyre::Result<()> {
+async fn test_tip20_pause_does_not_block_native_fees() -> eyre::Result<()> {
     use tempo_contracts::precompiles::{IFeeManager, IRolesAuth, ITIPFeeAMM};
     use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, tip20::PAUSE_ROLE};
 
@@ -878,13 +875,9 @@ async fn test_tip20_pause_blocks_fee_collection() -> eyre::Result<()> {
         "Transfer should succeed before pause"
     );
 
-    // ===== Test 1: User pauses the token in their transaction =====
-    // This should succeed because:
-    // - transfer_fee_pre_tx happens before pause (token not paused yet)
-    // - user's tx executes and pauses the token
-    // - transfer_fee_post_tx is allowed even when paused (for refunds)
-
+    // Pausing charges native gas and leaves the TIP-20 balance unchanged.
     let balance_before_pause_tx = token.balanceOf(user).call().await?;
+    let native_before = user_provider.get_balance(user).await?;
 
     let pause_receipt = user_token
         .pause()
@@ -897,24 +890,17 @@ async fn test_tip20_pause_blocks_fee_collection() -> eyre::Result<()> {
 
     assert!(
         pause_receipt.status(),
-        "Pause transaction should succeed - post_tx refund allowed even when paused"
+        "Pause transaction should succeed with native gas"
     );
 
     // Verify token is now paused
     assert!(token.paused().call().await?, "Token should be paused");
 
-    // Verify user paid fees (balance decreased due to gas fees)
     let balance_after_pause_tx = token.balanceOf(user).call().await?;
-    assert!(
-        balance_after_pause_tx < balance_before_pause_tx,
-        "User should have paid fees for the pause tx"
-    );
+    assert_eq!(balance_after_pause_tx, balance_before_pause_tx);
+    assert!(user_provider.get_balance(user).await? < native_before);
 
-    // ===== Test 2: Subsequent transactions fail at fee collection =====
-    // Now that the token is paused, any new transaction attempting to use
-    // this token for fees should fail at collect_fee_pre_tx
-
-    // Try to send another transaction - should fail because fee token is paused
+    // Token transfers remain blocked by the pause.
     let transfer_result = user_token
         .transfer(Address::random(), U256::from(100))
         .call()
@@ -922,7 +908,7 @@ async fn test_tip20_pause_blocks_fee_collection() -> eyre::Result<()> {
 
     assert!(
         transfer_result.is_err(),
-        "Transaction should fail when fee token is paused"
+        "Token transfer should fail while paused"
     );
 
     // Verify balance unchanged after failed attempt
@@ -931,6 +917,14 @@ async fn test_tip20_pause_blocks_fee_collection() -> eyre::Result<()> {
         balance_after_failed, balance_after_pause_tx,
         "Balance should be unchanged after failed tx"
     );
+
+    // The paused token preference does not prevent unrelated transactions.
+    let receipt = user_provider
+        .send_transaction(alloy_rpc_types_eth::TransactionRequest::default().to(user))
+        .await?
+        .get_receipt()
+        .await?;
+    assert!(receipt.status());
 
     Ok(())
 }

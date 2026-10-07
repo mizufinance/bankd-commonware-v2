@@ -286,6 +286,7 @@ async fn test_burn_liquidity() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: gas no longer swaps the user's TIP-20 token into the validator's token"]
 async fn test_transact_different_fee_tokens() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -424,6 +425,7 @@ async fn test_transact_different_fee_tokens() -> eyre::Result<()> {
 #[test_case(false ; "no_direct_pool")]
 #[test_case(true ; "insufficient_direct_pool")]
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: gas no longer uses TIP-20 AMM fee routes"]
 async fn test_transact_two_hop_fee_route(direct_pool_exists: bool) -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -779,6 +781,7 @@ async fn test_burn_liquidity_partial() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: burning AMM liquidity cannot remove liquidity needed for native BRL gas"]
 async fn test_cant_burn_required_liquidity() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

@@ -326,14 +326,14 @@ where
         let mut state = EvmState::default();
         for &(to, amount) in payouts {
             for (address, credit) in [(SHIELD_ADDRESS, false), (to, true)] {
-                if !state.contains_key(&address) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = state.entry(address) {
                     let info = db
                         .basic(address)
                         .map_err(BlockExecutionError::other)?
                         .unwrap_or_default();
                     let mut account = Account::from(info);
                     account.mark_touch();
-                    state.insert(address, account);
+                    entry.insert(account);
                 }
                 let account = state.get_mut(&address).expect("inserted above");
                 account.info.balance = if credit {
@@ -915,6 +915,10 @@ where
 
 #[cfg(test)]
 mod shield_tests;
+
+fn shield_err(error: impl core::fmt::Display) -> BlockExecutionError {
+    BlockExecutionError::msg(format!("shieldd: {error}"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -2283,8 +2287,4 @@ mod tests {
             result.gas_used, cumulative, regular
         );
     }
-}
-
-fn shield_err(error: impl core::fmt::Display) -> BlockExecutionError {
-    BlockExecutionError::msg(format!("shieldd: {error}"))
 }

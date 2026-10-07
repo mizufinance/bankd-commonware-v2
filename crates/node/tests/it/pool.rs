@@ -28,10 +28,7 @@ use std::{num::NonZeroU64, sync::Arc};
 use tempo_chainspec::spec::{TEMPO_T1_BASE_FEE, TempoChainSpec};
 use tempo_node::node::TempoNode;
 use tempo_precompiles::{DEFAULT_FEE_TOKEN, tip_fee_manager::TipFeeManager};
-use tempo_primitives::{
-    TempoTransaction, TempoTxEnvelope,
-    transaction::{calc_gas_balance_spending, tempo_transaction::Call},
-};
+use tempo_primitives::{TempoTransaction, TempoTxEnvelope, transaction::tempo_transaction::Call};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn submit_pending_tx() -> eyre::Result<()> {
@@ -140,7 +137,7 @@ async fn test_insufficient_funds() -> eyre::Result<()> {
     assert_eq!(err.got, U256::ZERO);
     assert_eq!(
         err.expected,
-        calc_gas_balance_spending(tx.gas_limit(), tx.max_fee_per_gas())
+        U256::from(tx.gas_limit()) * U256::from(tx.max_fee_per_gas())
     );
 
     Ok(())
@@ -418,6 +415,7 @@ async fn test_evict_tx_on_validator_token_change() -> eyre::Result<()> {
 /// 4. Node1 imports node2's block (with the policy change)
 /// 5. The 9 non-whitelisted transactions are evicted; the whitelisted one survives
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: TIP-20 fee-token policy changes do not invalidate native BRL gas payment"]
 async fn test_evict_txs_on_transfer_policy_change() -> eyre::Result<()> {
     use alloy::sol_types::SolCall;
     use tempo_contracts::precompiles::{ITIP20, ITIP403Registry};

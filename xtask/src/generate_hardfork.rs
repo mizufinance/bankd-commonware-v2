@@ -7,7 +7,7 @@ const HARDFORK_SOURCE: &str = "crates/hardfork/src/lib.rs";
 const CHAINSPEC_SOURCE: &str = "crates/chainspec/src/spec.rs";
 const GENESIS_ARGS_SOURCE: &str = "xtask/src/genesis_args.rs";
 const FOUNDRY_CONFIG: &str = "tips/verify/foundry.toml";
-const BENCH_WORKFLOW: &str = ".github/workflows/bench.yml";
+const BENCH_WORKFLOW: &str = ".github/disabled-workflows/bench.yml";
 const DEV_GENESIS: &str = "crates/chainspec/src/genesis/dev.json";
 const TEST_GENESIS: &str = "crates/node/tests/assets/test-genesis.json";
 const SNAPSHOT_DIR: &str = "crates/evm/src/snapshots";
@@ -517,7 +517,7 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        let source = include_str!("../../.github/workflows/bench.yml");
+        let source = include_str!("../../.github/disabled-workflows/bench.yml");
 
         let updated = append_bench_hardfork(source, &variants, "T10", "T11")
             .expect("add-hardfork should tolerate the current benchmark workflow shape without an in-workflow hardfork allowlist");

@@ -11,7 +11,8 @@ the `shieldd` path dependencies), and keep checkout credentials out of the workt
 Public StepSecurity runner hardening remains enabled with egress auditing. Native
 build dependencies and Cargo caching are shared through a local setup action.
 Rust builds use two compiler workers and omit debug information to fit standard
-runners, with a longer timeout for cold builds.
+runners, with a longer timeout for cold builds. Clippy and documentation use the
+same pinned nightly compiler; formatting still uses `cargo +nightly fmt`.
 
 ## Checks retained
 
@@ -25,7 +26,58 @@ runners, with a longer timeout for cold builds.
 
 Summary jobs fail on failed, cancelled, or unexpectedly skipped prerequisites.
 Only jobs explicitly excluded by their event or path conditions may be skipped.
-The existing advisory status of the flaky-test job is unchanged.
+Snapshot-restart tests run only in the existing advisory job. Its failures remain
+visible without blocking the PR. The inherited `on-timeout = "pass"` override is
+removed: a timeout now fails that test instead of claiming success.
+
+The checks also exposed two runtime bugs that are fixed, not excluded: Shieldd
+shutdown now releases background database references before reopening, and
+consensus finalization schedules blocking work on the execution node's runtime
+instead of assuming the caller runs inside Tokio. Restart and end-to-end tests
+remain enabled. The stale-DKG snapshot fixture now clears archive metadata along
+with its data partitions before installing a replacement snapshot. End-to-end
+failure output is retained in CI logs instead of suppressed.
+
+The generated test genesis is refreshed to include the 100 native BRL account
+allocations and five Bankd module predeploys already emitted by the generator.
+The generator and existing allocations are unchanged. The gas-fee integration
+tests now check native BRL charges, refunds, and escrow credits on successful and
+failed transactions, with TIP-20 balances unchanged. Token creation and payment
+lane tests likewise expect the funded native balances.
+
+Thirteen inherited node integration cases are explicitly ignored because they require
+the removed TIP-20 gas settlement path: `test_set_user_token`,
+`test_fee_token_tx`, `test_transact_different_fee_tokens`, both
+`test_transact_two_hop_fee_route` variants, and
+`test_cant_burn_required_liquidity`. Their source and ignore reasons remain next
+to the tests. Direct AMM contract tests and liquidity mint/burn tests still run.
+Fee sponsorship and payload fee scoring are adapted to native BRL and remain
+required, as do successful and failed transaction fee tests. The other retired
+cases are:
+
+| Cases | Obsolete expectation |
+| --- | --- |
+| `pool::test_evict_txs_on_transfer_policy_change`, `tempo_transaction::local::test_aa_keychain_spending_limit_toctou_dos` | Pool eviction based on a TIP-20 gas token's policy or spending limit. Bankd validates native gas payment; TIP-20 transfer restrictions still execute in the token contract, and native Compliance checks still run. |
+| `storage_credits::test_tip1060_keychain_fee_refund_does_not_retain_storage_credit`, `storage_credits::test_tip1060_successful_fee_token_spend_fee_refund_cancels_restored_balance_credit` | Gas refunds restore TIP-20 balance/spending-limit storage slots. Native gas refunds do not touch those slots. |
+| `storage_credits::test_tip1060_rebalance_swap_does_not_mint_stale_fee_manager_custody_credit`, `storage_credits::test_tip1060_fee_manager_credit_from_distribute_fees_is_not_redeemable`, `storage_credits::test_tip1060_distribute_fees_receive_policy_guard_creations_are_accounted` | Gas accumulates TIP-20 FeeManager custody and validator distribution balances. Bankd credits native escrow instead. |
+
+Fresh helper wallets are funded with native BRL. Gas snapshots are updated for
+Bankd's fee path, which no longer warms TIP-20 storage during gas collection;
+the gas matrices and their behavioral assertions remain enabled. The paused-token
+test now verifies that pausing blocks token transfers while native gas remains usable.
+The four 85-case transfer matrices get ten minutes to complete on standard
+runners, including their additional native-funding transactions.
+
+The experimental `--builder.parallel` mode is disabled at the payload builder's
+constructor, including requests through the Rust API. Its legacy storage-action
+replay cannot account for native BRL balance changes or Compliance reads. Such
+requests log a warning and use ordinary EVM execution; transaction prewarming
+remains enabled. One related test, `test_tip20_full_evm_storage_actions`, is
+explicitly ignored because its complete-state replay assumption no longer holds.
+The implementation and test are preserved for a future Bankd-aware replay design.
+A native-fee integration case also runs with a parallel request to check the safe
+fallback. Together with the thirteen obsolete node cases above, this PR adds
+fourteen explicit ignored cases; existing ignored tests are unchanged.
 
 Formatting covers the Bankd workspace, rather than recursively enforcing Bankd's
 style on `shieldd`'s separate workspace. Spelling excludes submodules and vendored
@@ -88,6 +140,11 @@ script is deleted by these moves.
   Its existing filter already excludes the live testnet/devnet matrix tests.
 - The Python flaky-test reporter runs with the runner's Python, so installing a
   separate uv runtime solely for those standard-library scripts is unnecessary.
+- End-to-end partitions compile the `tempo-e2e` package directly, avoiding
+  redundant builds of unrelated workspace test binaries. Known snapshot-restart
+  cases run in the separate advisory job instead of also running in required
+  partitions. Hardfork helper tests read the preserved benchmark workflow from
+  its new location.
 
 ## Restoring automation
 

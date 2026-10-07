@@ -202,7 +202,7 @@ pub struct PoolChecker(ShieldHandle);
 
 impl PoolChecker {
     /// Shares the node's engine with the pool.
-    pub fn new(
+    pub fn shared(
         shield: ShieldHandle,
     ) -> Arc<dyn tempo_transaction_pool::validator::ShieldedTxChecker> {
         Arc::new(Self(shield))

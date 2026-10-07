@@ -19,6 +19,7 @@ const SNAPSHOT_PARTITION_SUFFIXES: &[&str] = &[
     "finalizations-by-height-ordinal",
     "finalized-blocks-prunable-key",
     "finalized-blocks-prunable-value",
+    "finalized-blocks-prunable-metadata",
 ];
 
 /// A validator retains its DKG journal while replacing the finalized consensus snapshot with one

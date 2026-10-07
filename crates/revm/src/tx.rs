@@ -1105,7 +1105,7 @@ mod tests {
             // bankd: unscaled wei, matching revm's default (u128 gas cost).
             let result = tx_env.max_balance_spending();
 
-            match (gas_limit as u128)
+            match u128::from(gas_limit)
                 .checked_mul(max_fee_per_gas)
                 .and_then(|gas| alloy_primitives::U256::from(gas).checked_add(value))
             {

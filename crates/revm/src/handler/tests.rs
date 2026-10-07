@@ -810,7 +810,7 @@ fn test_aa_gas_value_transfer() {
     );
 
     // bankd: native BRL value is allowed in AA calls and pays the usual value transfer cost.
-    let mut zero_value_env = aa_env.clone();
+    let mut zero_value_env = aa_env;
     zero_value_env.aa_calls[0].value = U256::ZERO;
     let zero_value = calculate_aa_batch_intrinsic_gas(
         &zero_value_env,

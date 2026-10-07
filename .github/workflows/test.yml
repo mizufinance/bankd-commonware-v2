@@ -117,9 +117,9 @@ jobs:
         continue-on-error: true
         run: python3 -m unittest discover -s .github/scripts -p 'test_warn_flaky_e2e.py'
       - name: Build e2e tests
-        run: cargo nextest run --profile ci -E 'package(tempo-e2e)' --partition slice:${{ matrix.partition }}/4 --no-run
+        run: cargo nextest run -p tempo-e2e --profile ci -E 'not test(can_restart_after_joining_from_snapshot)' --partition slice:${{ matrix.partition }}/4 --no-run
       - name: Run e2e tests
-        run: cargo nextest run --profile ci -E 'package(tempo-e2e)' --partition slice:${{ matrix.partition }}/4
+        run: cargo nextest run -p tempo-e2e --profile ci -E 'not test(can_restart_after_joining_from_snapshot)' --partition slice:${{ matrix.partition }}/4
       - name: Warn about flaky e2e tests
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -157,9 +157,9 @@ jobs:
         with:
           tool: nextest@0.9.127
       - name: Build flaky e2e tests
-        run: cargo nextest run --profile ci-flaky --no-run
+        run: cargo nextest run -p tempo-e2e --profile ci-flaky --no-run
       - name: Run flaky e2e tests
-        run: cargo nextest run --profile ci-flaky
+        run: cargo nextest run -p tempo-e2e --profile ci-flaky
 
   cli:
     name: CLI smoke tests

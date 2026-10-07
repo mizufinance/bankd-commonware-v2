@@ -250,6 +250,9 @@ async fn test_tip20_channel_reserve_gas_snapshots(hardfork: TempoHardfork) -> ey
     let mut operator = TempoTxSender::connect_with_zero_nonce(http_url, fixed_signer(0x13)).await?;
 
     funder
+        .fund_native([payer.address(), payee.address(), operator.address()])
+        .await?;
+    funder
         .fund_tip20(
             PATH_USD_ADDRESS,
             [payer.address(), payee.address(), operator.address()],

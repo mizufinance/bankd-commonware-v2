@@ -181,6 +181,22 @@ impl<P: Provider> TempoTxSender<P> {
             .send(self)
             .await
     }
+
+    /// Give auxiliary signers native BRL for Bankd gas without using their nonces.
+    pub(crate) async fn fund_native(
+        &mut self,
+        accounts: impl IntoIterator<Item = Address>,
+    ) -> eyre::Result<Receipt> {
+        let mut calls = TempoCalls::new();
+        for to in accounts {
+            calls.calls.push(Call {
+                to: to.into(),
+                value: U256::from(100_000_000_000_000_000_000u128),
+                input: Bytes::new(),
+            });
+        }
+        calls.send(self).await
+    }
 }
 
 pub(crate) struct TempoCalls {
