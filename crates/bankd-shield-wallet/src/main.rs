@@ -15,7 +15,11 @@ use decaf377::Fr;
 use rand_core::OsRng;
 use shieldd_sdk_app::SUBSTORE_PREFIXES;
 use shieldd_sdk_asset::{Value, asset};
-use shieldd_sdk_keys::{Address, keys::Bip44Path, keys::SpendKey, test_keys};
+use shieldd_sdk_keys::{
+    Address,
+    keys::{Bip44Path, SpendKey},
+    test_keys,
+};
 use shieldd_sdk_mock_client::{
     ActionIntent, MockClient, TransactionIntent, TransferIntent, WithdrawalIntent,
 };

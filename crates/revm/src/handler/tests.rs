@@ -24,11 +24,13 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, storage::ContractStorage, test_util::TIP20Setup,
     tip_fee_manager::TipFeeManager,
 };
-use tempo_primitives::TempoAddressExt;
-use tempo_primitives::transaction::{
-    Call, PrimitiveSignature, RecoveredTempoAuthorization, TempoSignature,
-    TempoSignedAuthorization, calc_gas_balance_spending,
-    tt_signature::{P256SignatureWithPreHash, WebAuthnSignature},
+use tempo_primitives::{
+    TempoAddressExt,
+    transaction::{
+        Call, PrimitiveSignature, RecoveredTempoAuthorization, TempoSignature,
+        TempoSignedAuthorization, calc_gas_balance_spending,
+        tt_signature::{P256SignatureWithPreHash, WebAuthnSignature},
+    },
 };
 
 fn create_test_journal() -> Journal<CacheDB<EmptyDB>> {

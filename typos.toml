@@ -12,6 +12,9 @@ extend-exclude = [
     "**/*_test.*",
     "**/*_tests.*",
     "tips/verify/lib/**",
+    "contracts/lib/**",
+    "crates/bankd-shield/vendor/**",
+    "shieldd/**",
 ]
 
 [default.extend-words]
@@ -22,6 +25,8 @@ froms = "froms"
 Nam = "Nam"
 prool = "prool"
 Prool = "Prool"
+shieldd = "shieldd"
+Groth = "Groth"
 JOD = "JOD"
 
 [default.extend-identifiers]
