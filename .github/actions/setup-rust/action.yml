@@ -33,6 +33,12 @@ runs:
         toolchain: ${{ steps.toolchain.outputs.version }}
         components: ${{ inputs.components }}
         targets: ${{ inputs.target }}
+    - name: Select the installed toolchain for this checkout
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ steps.toolchain.outputs.version }}
+      # A default toolchain alone does not override rust-toolchain.toml.
+      run: rustup override set "$TOOLCHAIN"
     - name: Install native build dependencies
       if: inputs.build == 'true'
       shell: bash
