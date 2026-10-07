@@ -31,6 +31,9 @@ class AdvisoryFeatureTests(unittest.TestCase):
         self.assertEqual(self.check_version("0.3.20", ["fmt"]), [])
         self.assertEqual(self.check_version("0.3.23", ["fmt"]), [])
 
+    def test_prerelease_does_not_count_as_the_patched_release(self):
+        self.assertEqual(self.check_version("0.3.20-rc.1", ["fmt"]), ["0.3.20-rc.1"])
+
 
 if __name__ == "__main__":
     unittest.main()

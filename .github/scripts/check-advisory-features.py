@@ -10,8 +10,10 @@ def vulnerable_formatters(metadata):
     for package in metadata["packages"]:
         if package["name"] != "tracing-subscriber":
             continue
-        version = tuple(int(part) for part in package["version"].split("-")[0].split("."))
-        if version < (0, 3, 20) and "fmt" in nodes[package["id"]]["features"]:
+        core, _, prerelease = package["version"].partition("-")
+        version = tuple(int(part) for part in core.split("+", 1)[0].split("."))
+        unpatched = version < (0, 3, 20) or (version == (0, 3, 20) and bool(prerelease))
+        if unpatched and "fmt" in nodes[package["id"]]["features"]:
             affected.append(package["version"])
     return affected
 
