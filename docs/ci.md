@@ -65,6 +65,9 @@ Fresh helper wallets are funded with native BRL. Gas snapshots are updated for
 Bankd's fee path, which no longer warms TIP-20 storage during gas collection;
 the gas matrices and their behavioral assertions remain enabled. The paused-token
 test now verifies that pausing blocks token transfers while native gas remains usable.
+Access-key matrix fixtures authorize native gas separately from TIP-20 transfers:
+spending the exact token limit now succeeds, while over-limit token transfers and
+keys without a gas allowance remain rejected or reverted as appropriate.
 The four 85-case transfer matrices get ten minutes to complete on standard
 runners, including their additional native-funding transactions.
 

@@ -762,11 +762,23 @@ pub(crate) fn create_default_token_limit(
 ) -> Vec<tempo_primitives::transaction::TokenLimit> {
     use tempo_primitives::transaction::TokenLimit;
 
-    vec![TokenLimit {
-        token: DEFAULT_FEE_TOKEN,
-        limit: funded / U256::from(2),
+    vec![
+        TokenLimit {
+            token: DEFAULT_FEE_TOKEN,
+            limit: funded / U256::from(2),
+            period: 0,
+        },
+        native_gas_limit(),
+    ]
+}
+
+/// Permit one native BRL of gas independently of the TIP-20 transfer allowance.
+pub(crate) fn native_gas_limit() -> TokenLimit {
+    TokenLimit {
+        token: tempo_revm::handler::NATIVE_FEE_TOKEN,
+        limit: U256::from(1_000_000_000_000_000_000u64),
         period: 0,
-    }]
+    }
 }
 
 // ===== Transaction Creation Helper Functions =====
