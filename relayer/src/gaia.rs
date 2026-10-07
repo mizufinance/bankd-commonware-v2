@@ -27,7 +27,9 @@ use cw_commonware::{
 use eyre::{Context as _, eyre};
 use prost::Message;
 
-use crate::{CertifiedBlock, IBCSTORE_SLOT, POLL, abi, commitment_path, hex_u64};
+use crate::{
+    CertifiedBlock, IBCSTORE_SLOT, POLL, abi, client_update_heights, commitment_path, hex_u64,
+};
 
 /// Simplex namespace bankd signs with (crates/consensus NAMESPACE).
 const NAMESPACE: &[u8] = b"TEMPO";
@@ -422,13 +424,9 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
 
     // Boundary headers between the client's height and the proof height first, so the client
     // learns each next committee, then the proof height itself.
-    let len = bankd.epoch_length;
-    let mut heights: Vec<u64> = (client_height / len..proof_height / len)
-        .map(|e| (e + 1) * len - 1)
-        .collect();
-    heights.push(proof_height);
+    let heights = client_update_heights(client_height, proof_height, bankd.epoch_length);
     let mut messages = Vec::new();
-    for h in heights.into_iter().filter(|h| *h > client_height) {
+    for h in heights.filter(|h| *h > client_height) {
         let header = bankd.finalization(h).await?;
         messages.push(proto::Any::pack(
             "/ibc.core.client.v1.MsgUpdateClient",
