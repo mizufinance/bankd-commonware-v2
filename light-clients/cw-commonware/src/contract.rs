@@ -69,7 +69,7 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary, Error> {
             json(&())
         }
         QueryMsg::CheckForMisbehaviour(m) => {
-            let v = verify(deps.storage, deps.api, &m)?;
+            let (_, v) = verify(deps.storage, deps.api, &m)?;
             let found = state::consensus_state(deps.storage, v.height)?
                 .is_some_and(|existing| existing != consensus_of(&v));
             json(&CheckForMisbehaviourResult {
@@ -121,12 +121,12 @@ fn consensus_at(storage: &dyn Storage, height: Height) -> Result<ConsensusState,
         .ok_or(Error::ConsensusStateNotFound(height.revision_height))
 }
 
-/// Decodes and checks a header against the stored client state.
+/// Decodes and checks a header, returning the stored client state it was verified against.
 fn verify(
     storage: &dyn Storage,
     api: &dyn Api,
     m: &ClientMessageMsg,
-) -> Result<VerifiedHeader, Error> {
+) -> Result<(ClientState, VerifiedHeader), Error> {
     let cs = state::client_state(storage)?;
     if cs.frozen {
         return Err(Error::Frozen);
@@ -137,13 +137,14 @@ fn verify(
         epoch_length: cs.epoch_length,
         latest_height: cs.latest_height,
     };
-    verify_header(
+    let v = verify_header(
         api,
         &params,
         |e| cs.key(e),
         &header.header_rlp,
         &header.certificate,
-    )
+    )?;
+    Ok((cs, v))
 }
 
 /// Stores the header's consensus state and, on boundary blocks, the next committee's key.
@@ -153,8 +154,7 @@ fn update_state(
     api: &dyn Api,
     m: &ClientMessageMsg,
 ) -> Result<Binary, Error> {
-    let v = verify(storage, api, m)?;
-    let mut cs = state::client_state(storage)?;
+    let (mut cs, v) = verify(storage, api, m)?;
     let heights = vec![Height {
         revision_number: 0,
         revision_height: v.height,

@@ -3,7 +3,7 @@
 use cosmwasm_std::{
     from_json,
     testing::{message_info, mock_dependencies, mock_env, MockApi},
-    to_json_vec, Binary, OwnedDeps, Storage,
+    to_json_vec, Binary, Order, OwnedDeps, Storage,
 };
 use cw_commonware::{
     contract::{instantiate, query, sudo},
@@ -162,6 +162,59 @@ fn updates_rotate_and_store_consensus() {
 }
 
 #[test]
+fn sudo_update_stores_consensus_and_preserves_checksum() {
+    let (mut deps, f) = setup();
+    let mut expected_client = state::client_state(&deps.storage).unwrap();
+    expected_client.latest_height = 3;
+
+    let res = sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::UpdateState(header_msg(&f, 0)),
+    )
+    .unwrap();
+    let res: UpdateStateResult = from_json(res.data.unwrap()).unwrap();
+    assert_eq!(res.heights, vec![height(3)]);
+    assert_eq!(state::client_state(&deps.storage).unwrap(), expected_client);
+    let t = &f["updates"][0]["timestamp"];
+    let expected_consensus = ConsensusState {
+        timestamp: t.as_u64().unwrap_or_else(|| s(t).parse().unwrap()),
+        state_root: s(&f["updates"][0]["stateRoot"]).parse().unwrap(),
+    };
+    assert_eq!(
+        state::consensus_state(&deps.storage, 3).unwrap(),
+        Some(expected_consensus)
+    );
+
+    let raw = deps.storage.get(state::CLIENT_STATE_KEY).unwrap();
+    let any = <state::Any as prost::Message>::decode(raw.as_slice()).unwrap();
+    let wasm = <state::WasmClientState as prost::Message>::decode(any.value.as_slice()).unwrap();
+    assert_eq!(wasm.checksum, vec![7u8; 32]);
+    assert_eq!(wasm.latest_height.unwrap().revision_height, 3);
+}
+
+#[test]
+fn sudo_update_rejects_mismatched_certificate_without_writes() {
+    let (mut deps, f) = setup();
+    let mut m = header_msg(&f, 0);
+    let mut header: Header = from_json(&m.client_message).unwrap();
+    header.certificate = s(&f["updates"][1]["tempoCertificate"]).parse().unwrap();
+    m.client_message = to_json_vec(&header).unwrap().into();
+    let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+
+    assert_eq!(
+        sudo(deps.as_mut(), mock_env(), SudoMsg::UpdateState(m)).unwrap_err(),
+        Error::PayloadMismatch
+    );
+    assert_eq!(
+        deps.storage
+            .range(None, None, Order::Ascending)
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
 fn update_needs_the_boundary_first() {
     let (mut deps, f) = setup();
     assert_eq!(
@@ -262,6 +315,22 @@ fn queries_and_freeze() {
     )
     .unwrap();
     assert_eq!(status(&deps), "Frozen");
+    let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+    assert_eq!(
+        sudo(
+            deps.as_mut(),
+            mock_env(),
+            SudoMsg::UpdateState(header_msg(&f, 1)),
+        )
+        .unwrap_err(),
+        Error::Frozen
+    );
+    assert_eq!(
+        deps.storage
+            .range(None, None, Order::Ascending)
+            .collect::<Vec<_>>(),
+        before
+    );
     assert_eq!(update(&mut deps, &f, 1).unwrap_err(), Error::Frozen);
 }
 
