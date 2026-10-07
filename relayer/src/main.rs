@@ -181,11 +181,8 @@ async fn update_client(src: &Chain, dst: &Chain, height: u64) -> eyre::Result<()
     let lc_addr = router.getClient(dst.client_id.clone()).call().await?;
     let lc = CommonwareLightClient::new(lc_addr, &dst.provider);
     let state = ClientState::abi_decode(&lc.getClientState().call().await?)?;
-    let len = state.epochLength;
-    let mut heights: Vec<u64> = (state.latestHeight.revisionHeight / len..height / len)
-        .map(|e| (e + 1) * len - 1)
-        .collect();
-    heights.push(height);
+    let heights =
+        client_update_heights(state.latestHeight.revisionHeight, height, state.epochLength);
 
     for h in heights {
         if lc.getConsensusState(h).call().await?.stateRoot != B256::ZERO {
@@ -207,6 +204,18 @@ async fn update_client(src: &Chain, dst: &Chain, height: u64) -> eyre::Result<()
         eprintln!("{} <- {}: updateClient height={h}", dst.name, src.name);
     }
     Ok(())
+}
+
+/// Epoch-final blocks needed to reach `target_height`, followed by the target itself.
+/// `epoch_length` must be nonzero.
+fn client_update_heights(
+    current_height: u64,
+    target_height: u64,
+    epoch_length: u64,
+) -> impl Iterator<Item = u64> {
+    (current_height / epoch_length..target_height / epoch_length)
+        .map(move |e| (e + 1) * epoch_length - 1)
+        .chain(std::iter::once(target_height))
 }
 
 fn commitment_path(client: &str, kind: u8, sequence: u64) -> Vec<u8> {
@@ -462,4 +471,40 @@ async fn main() -> eyre::Result<()> {
         relay(Kind::Acks, b, a),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_update_heights;
+
+    #[test]
+    fn client_update_heights_preserve_boundaries_and_target() {
+        for (current_height, target_height, epoch_length, expected) in [
+            (2, 7, 10, vec![7]),
+            (2, 32, 10, vec![9, 19, 29, 32]),
+            (9, 12, 10, vec![9, 12]),
+            (2, 29, 10, vec![9, 19, 29]),
+            (12, 12, 10, vec![12]),
+            (32, 12, 10, vec![12]),
+        ] {
+            assert_eq!(
+                client_update_heights(current_height, target_height, epoch_length)
+                    .collect::<Vec<_>>(),
+                expected,
+                "current={current_height}, target={target_height}, epoch_length={epoch_length}",
+            );
+        }
+    }
+
+    #[test]
+    fn client_update_heights_near_u64_max() {
+        assert_eq!(
+            client_update_heights(u64::MAX - 2, u64::MAX, 1).collect::<Vec<_>>(),
+            [u64::MAX - 2, u64::MAX - 1, u64::MAX],
+        );
+        assert_eq!(
+            client_update_heights(0, u64::MAX, u64::MAX).collect::<Vec<_>>(),
+            [u64::MAX - 1, u64::MAX],
+        );
+    }
 }
