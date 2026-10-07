@@ -10,6 +10,8 @@ The active workflows use pinned public actions, initialize submodules (including
 the `shieldd` path dependencies), and keep checkout credentials out of the worktree.
 Public StepSecurity runner hardening remains enabled with egress auditing. Native
 build dependencies and Cargo caching are shared through a local setup action.
+Package downloads have bounded network timeouts and retries after a stalled
+Ubuntu mirror held a job in setup for more than thirty minutes.
 Rust builds use two compiler workers and omit debug information to fit standard
 runners, with a longer timeout for cold builds. Clippy and documentation use the
 same pinned nightly compiler; formatting still uses `cargo +nightly fmt`.
@@ -30,7 +32,7 @@ Snapshot-restart tests run only in the existing advisory job. Its failures remai
 visible without blocking the PR. The inherited `on-timeout = "pass"` override is
 removed: a timeout now fails that test instead of claiming success.
 
-The checks also exposed two runtime bugs that are fixed, not excluded: Shieldd
+The checks also exposed runtime bugs that are fixed, not excluded: Shieldd
 shutdown now releases background database references before reopening, and
 consensus finalization schedules blocking work on the execution node's runtime
 instead of assuming the caller runs inside Tokio. Restart and end-to-end tests
@@ -41,6 +43,9 @@ reopening the same database. Failure output is retained in CI logs instead of
 suppressed.
 The sparse-trie test checks Reth's synchronous fallback on runners with fewer
 than five CPU threads, and checks the shared-trie path on larger hosts.
+Transaction prewarming keeps its EVM cache separate from Reth's shared worker
+state and resets it between payload builds. The worker-state regression waits
+for cleanup before asserting that other users' state remains intact.
 
 The generated test genesis is refreshed to include the 100 native BRL account
 allocations and five Bankd module predeploys already emitted by the generator.

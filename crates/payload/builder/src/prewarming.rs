@@ -1,7 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, Sender},
+use std::{
+    cell::RefCell,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
 };
 
 use alloy_primitives::B256;
@@ -9,7 +12,7 @@ use reth_engine_tree::tree::{CachedStateProvider, SavedCache};
 use reth_evm::{Evm, EvmEnvFor};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{StateProviderBox, StateProviderFactory};
-use reth_tasks::{TaskExecutor, WorkerPool};
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     BestTransactions, PoolTransaction, error::InvalidPoolTransactionError,
 };
@@ -18,6 +21,18 @@ use tempo_transaction_pool::{StateAwarePoolTransaction, best::BestTransaction};
 use tracing::{instrument, trace};
 
 pub(crate) type PrewarmEvmState = Option<TempoEvm<StateProviderDatabase<StateProviderBox>>>;
+
+struct CachedPrewarmEvm {
+    build: Arc<AtomicBool>,
+    evm: PrewarmEvmState,
+}
+
+thread_local! {
+    // Reth's shared worker slot can belong to another pool user. Keep our cache
+    // separate, and identify the payload build so a reused thread cannot retain
+    // an EVM for a different parent or execution environment.
+    static PREWARM_EVM: RefCell<Option<CachedPrewarmEvm>> = const { RefCell::new(None) };
+}
 
 /// Prewarming orchestrator that consumes source [`BestTransactions`] with bounded
 /// lookahead, prewarms buffered transactions in parallel, and produces a new
@@ -80,11 +95,6 @@ impl BestTransactionsPrewarming {
         let pool = executor.prewarming_pool();
 
         pool.in_place_scope(|scope| {
-            let prewarm = ctx.prewarm.clone();
-            scope.spawn(move |_| {
-                pool.init::<PrewarmEvmState>(|_| prewarm.evm_for_ctx());
-            });
-
             let advance = |ctx: &mut BestTransactionsPrewarmingContext<Txs, Provider>| {
                 let Some(tx) = ctx.best_txs.next() else {
                     let _ = ctx.transactions_tx.send(None);
@@ -161,7 +171,17 @@ impl BestTransactionsPrewarming {
             }
         });
 
-        pool.clear();
+        let build = &ctx.prewarm.stop;
+        pool.broadcast(pool.current_num_threads(), |_| {
+            PREWARM_EVM.with_borrow_mut(|cached| {
+                if cached
+                    .as_ref()
+                    .is_some_and(|cached| Arc::ptr_eq(&cached.build, build))
+                {
+                    *cached = None;
+                }
+            });
+        });
     }
 
     /// Prewarms a transaction by executing it on top of the latest state.
@@ -177,12 +197,12 @@ impl BestTransactionsPrewarming {
     where
         Provider: StateProviderFactory + Clone + 'static,
     {
-        let replay = WorkerPool::with_worker_mut(|worker| {
+        let replay = prewarm.with_evm(|evm| {
             if prewarm.parallel && !is_parallel_candidate(&tx) {
                 return None;
             }
 
-            let evm = worker.get_or_init(|| prewarm.evm_for_ctx()).as_mut()?;
+            let evm = evm.as_mut()?;
 
             if prewarm.is_stopped() {
                 return None;
@@ -369,6 +389,19 @@ where
         }
     }
 
+    fn with_evm<R>(&self, f: impl FnOnce(&mut PrewarmEvmState) -> R) -> R {
+        PREWARM_EVM.with_borrow_mut(|cached| {
+            let cached = match cached {
+                Some(cached) if Arc::ptr_eq(&cached.build, &self.stop) => cached,
+                cached => cached.insert(CachedPrewarmEvm {
+                    build: self.stop.clone(),
+                    evm: self.evm_for_ctx(),
+                }),
+            };
+            f(&mut cached.evm)
+        })
+    }
+
     pub(crate) fn evm_for_ctx(&self) -> PrewarmEvmState {
         let mut state_provider = match self.provider.state_by_block_hash(self.parent_hash) {
             Ok(provider) => provider,
@@ -492,6 +525,7 @@ mod tests {
         Recovered, SealedHeader, transaction::error::InvalidTransactionError,
     };
     use reth_storage_api::noop::NoopProvider;
+    use reth_tasks::WorkerPool;
     use reth_transaction_pool::{
         TransactionOrigin, ValidPoolTransaction, identifier::TransactionId,
     };
@@ -957,8 +991,37 @@ mod tests {
 
         assert!(prewarming.next().is_some());
 
+        // Wait for execution and cleanup so the assertion cannot race initialization.
+        drop(prewarming);
+
         pool.broadcast(pool.current_num_threads(), |worker| {
             assert_eq!(*worker.get::<usize>(), 1);
+        });
+    }
+
+    #[test]
+    fn prewarming_state_is_scoped_to_payload_build() {
+        let executor = TaskExecutor::test();
+        let first = prewarming_context(executor.clone(), true);
+        let second = prewarming_context(executor, true);
+        let pool = WorkerPool::new(1, "prewarm-build-test");
+
+        pool.install_fn(|| {
+            let action = StorageAction::Sstore(
+                Address::random(),
+                U256::from(1),
+                U256::from(2),
+                U256::from(3),
+            );
+            first.with_evm(|evm| {
+                assert_eq!(
+                    evm.as_mut().unwrap().replace_actions(vec![action]),
+                    Some(Vec::new())
+                );
+            });
+            second.with_evm(|evm| {
+                assert_eq!(evm.as_mut().unwrap().take_actions(), Some(Vec::new()));
+            });
         });
     }
 
@@ -969,7 +1032,6 @@ mod tests {
         context.evm_env.block_env.basefee = 0;
 
         let pool = WorkerPool::new(1, "prewarm-actions-test");
-        pool.init::<PrewarmEvmState>(|_| context.evm_for_ctx());
 
         pool.install_fn(|| {
             let failed_action = StorageAction::Sstore(
@@ -978,11 +1040,8 @@ mod tests {
                 U256::from(2),
                 U256::from(3),
             );
-            WorkerPool::with_worker_mut(|worker| {
-                let evm = worker
-                    .get_mut::<PrewarmEvmState>()
-                    .as_mut()
-                    .expect("prewarm EVM");
+            context.with_evm(|evm| {
+                let evm = evm.as_mut().expect("prewarm EVM");
                 // Model an action recorded before the failed execution returned an error.
                 assert_eq!(evm.replace_actions(vec![failed_action]), Some(Vec::new()));
             });
@@ -994,11 +1053,8 @@ mod tests {
                 None,
             );
             assert!(failed.replay.is_none());
-            WorkerPool::with_worker_mut(|worker| {
-                let evm = worker
-                    .get_mut::<PrewarmEvmState>()
-                    .as_mut()
-                    .expect("prewarm EVM");
+            context.with_evm(|evm| {
+                let evm = evm.as_mut().expect("prewarm EVM");
                 assert_eq!(evm.take_actions(), Some(Vec::new()));
             });
 
@@ -1011,7 +1067,5 @@ mod tests {
             assert!(!replay.actions.is_empty());
             assert!(!replay.actions.contains(&failed_action));
         });
-
-        pool.clear();
     }
 }

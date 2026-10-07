@@ -43,8 +43,9 @@ runs:
       if: inputs.build == 'true'
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y clang libclang-dev libudev-dev protobuf-compiler mold
+        apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        sudo apt-get "${apt_options[@]}" update
+        sudo apt-get "${apt_options[@]}" install -y clang libclang-dev libudev-dev protobuf-compiler mold
         sudo ln -sf /usr/bin/mold "$(realpath /usr/bin/ld)"
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       if: inputs.build == 'true'
