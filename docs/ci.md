@@ -36,7 +36,11 @@ consensus finalization schedules blocking work on the execution node's runtime
 instead of assuming the caller runs inside Tokio. Restart and end-to-end tests
 remain enabled. The stale-DKG snapshot fixture now clears archive metadata along
 with its data partitions before installing a replacement snapshot. End-to-end
-failure output is retained in CI logs instead of suppressed.
+shutdown also waits for background tasks to release their Shieldd handles before
+reopening the same database. Failure output is retained in CI logs instead of
+suppressed.
+The sparse-trie test checks Reth's synchronous fallback on runners with fewer
+than five CPU threads, and checks the shared-trie path on larger hosts.
 
 The generated test genesis is refreshed to include the 100 native BRL account
 allocations and five Bankd module predeploys already emitted by the generator.

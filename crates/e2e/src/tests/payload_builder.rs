@@ -6,6 +6,7 @@ use commonware_runtime::{
     deterministic::{Config, Runner},
 };
 use futures::future::join_all;
+use reth_node_core::args::EngineArgs;
 use reth_node_metrics::recorder::{PrometheusRecorder, install_prometheus_recorder};
 
 use crate::{
@@ -37,7 +38,7 @@ const NULLIFICATIONS_PER_LEADER_METRIC_SUFFIX: &str = "_nullifications_per_leade
 static PAYLOAD_BUILDER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test_traced]
-fn shared_sparse_trie_single_validator_bypasses_sync_state_root() {
+fn shared_sparse_trie_single_validator_uses_supported_state_root_path() {
     let _guard = payload_builder_test_lock();
     let deltas = run_payload_builder_test(&[true], 10);
 
@@ -49,15 +50,25 @@ fn shared_sparse_trie_single_validator_bypasses_sync_state_root() {
         deltas.builder_finish_count > 0,
         "expected payload builder finish metrics to increase"
     );
-    assert!(
-        deltas.sparse_trie_state_root_wait_count > 0,
-        "expected sparse trie state-root wait metrics to increase"
-    );
     assert_pool_inclusion_metrics(&deltas);
-    assert_eq!(
-        deltas.state_root_count, 0,
-        "expected shared sparse trie to bypass sync state-root work"
-    );
+    // Reth disables the state-root task on hosts with fewer than five CPU threads.
+    // Verify the synchronous fallback on standard runners as well as the shared path.
+    if EngineArgs::default().tree_config().use_state_root_task() {
+        assert!(
+            deltas.sparse_trie_state_root_wait_count > 0,
+            "expected sparse trie state-root wait metrics to increase"
+        );
+        assert_eq!(
+            deltas.state_root_count, 0,
+            "expected shared sparse trie to bypass sync state-root work"
+        );
+    } else {
+        assert_eq!(deltas.sparse_trie_state_root_wait_count, 0);
+        assert!(
+            deltas.state_root_count > 0,
+            "expected synchronous state-root work on a host without enough parallelism"
+        );
+    }
 }
 
 #[test_traced]
