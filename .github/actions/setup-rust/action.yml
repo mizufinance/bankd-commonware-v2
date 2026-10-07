@@ -43,9 +43,15 @@ runs:
       if: inputs.build == 'true'
       shell: bash
       run: |
+        # The Azure mirror stalled for thirty minutes, even with per-request timeouts.
+        for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+          if [[ -f "$source" ]]; then
+            sudo sed -i -E 's@https?://azure[.]archive[.]ubuntu[.]com/ubuntu@https://archive.ubuntu.com/ubuntu@g' "$source"
+          fi
+        done
         apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-        sudo apt-get "${apt_options[@]}" update
-        sudo apt-get "${apt_options[@]}" install -y clang libclang-dev libudev-dev protobuf-compiler mold
+        sudo timeout --kill-after=10s 5m apt-get "${apt_options[@]}" update
+        sudo timeout --kill-after=10s 10m apt-get "${apt_options[@]}" install -y clang libclang-dev libudev-dev protobuf-compiler mold
         sudo ln -sf /usr/bin/mold "$(realpath /usr/bin/ld)"
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       if: inputs.build == 'true'

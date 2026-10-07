@@ -118,6 +118,14 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts -p 'test_warn_flaky_e2e.py'
       - name: Build e2e tests
         run: cargo nextest run -p tempo-e2e --profile ci -E 'not test(can_restart_after_joining_from_snapshot)' --partition slice:${{ matrix.partition }}/4 --no-run
+      - name: Provide memory headroom for validator clusters
+        # Ten full execution nodes use more than 8 GiB even without build overhead.
+        run: |
+          sudo fallocate -l 4G /mnt/bankd-e2e.swap
+          sudo chmod 600 /mnt/bankd-e2e.swap
+          sudo mkswap /mnt/bankd-e2e.swap
+          sudo swapon /mnt/bankd-e2e.swap
+          free -h
       - name: Run e2e tests
         run: cargo nextest run -p tempo-e2e --profile ci -E 'not test(can_restart_after_joining_from_snapshot)' --partition slice:${{ matrix.partition }}/4
       - name: Warn about flaky e2e tests
@@ -158,6 +166,13 @@ jobs:
           tool: nextest@0.9.127
       - name: Build flaky e2e tests
         run: cargo nextest run -p tempo-e2e --profile ci-flaky --no-run
+      - name: Provide memory headroom for validator clusters
+        run: |
+          sudo fallocate -l 4G /mnt/bankd-e2e.swap
+          sudo chmod 600 /mnt/bankd-e2e.swap
+          sudo mkswap /mnt/bankd-e2e.swap
+          sudo swapon /mnt/bankd-e2e.swap
+          free -h
       - name: Run flaky e2e tests
         run: cargo nextest run -p tempo-e2e --profile ci-flaky
 

@@ -10,11 +10,15 @@ The active workflows use pinned public actions, initialize submodules (including
 the `shieldd` path dependencies), and keep checkout credentials out of the worktree.
 Public StepSecurity runner hardening remains enabled with egress auditing. Native
 build dependencies and Cargo caching are shared through a local setup action.
-Package downloads have bounded network timeouts and retries after a stalled
-Ubuntu mirror held a job in setup for more than thirty minutes.
+Package downloads use Ubuntu's official HTTPS archive instead of the Azure mirror,
+which repeatedly stalled in setup for thirty minutes. Downloads have network
+timeouts and retries, plus overall limits for index refresh and installation.
 Rust builds use two compiler workers and omit debug information to fit standard
 runners, with a longer timeout for cold builds. Clippy and documentation use the
 same pinned nightly compiler; formatting still uses `cargo +nightly fmt`.
+End-to-end runners get 4 GiB of additional swap: the ten-validator network
+fixtures use about 8.3 GiB by themselves in a local measurement, and repeatedly
+coincided with hosted-runner shutdowns. Those tests remain enabled.
 
 ## Checks retained
 
@@ -31,6 +35,9 @@ Only jobs explicitly excluded by their event or path conditions may be skipped.
 Snapshot-restart tests run only in the existing advisory job. Its failures remain
 visible without blocking the PR. The inherited `on-timeout = "pass"` override is
 removed: a timeout now fails that test instead of claiming success.
+The advisory profile sets its nine-minute limit explicitly because the pinned
+nextest version does not inherit per-test overrides from intermediate profiles
+([fixed upstream in 0.9.145](https://nexte.st/changelog/#09145---2026-09-16)).
 
 The checks also exposed runtime bugs that are fixed, not excluded: Shieldd
 shutdown now releases background database references before reopening, and
