@@ -207,7 +207,7 @@ fn verify_membership(storage: &dyn Storage, m: VerifyMembershipMsg) -> Result<Bi
         .merkle_path
         .key_path
         .into_iter()
-        .map(|p| p.to_vec())
+        .map(Vec::from)
         .collect();
     membership::verify(
         consensus.state_root,
@@ -228,7 +228,7 @@ fn verify_non_membership(
         .merkle_path
         .key_path
         .into_iter()
-        .map(|p| p.to_vec())
+        .map(Vec::from)
         .collect();
     membership::verify(consensus.state_root, cs.router, &path, &proof, None)?;
     Ok(Binary::default())
