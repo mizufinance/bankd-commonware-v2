@@ -60,9 +60,6 @@ pub fn read_varint(data: &[u8], off: &mut usize) -> Option<u64> {
             return Some(value);
         }
         shift += 7;
-        if shift > 63 {
-            return None;
-        }
     }
 }
 
