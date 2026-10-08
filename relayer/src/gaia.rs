@@ -34,6 +34,7 @@ const NAMESPACE: &[u8] = b"TEMPO";
 
 mod proto {
     //! The handful of ibc-go / cosmos-sdk messages we send, by hand instead of pulling ibc-proto.
+    pub use cw_commonware::state::{ProtoHeight as Height, WasmClientState};
     use prost::Message;
 
     #[derive(Clone, PartialEq, Message)]
@@ -51,24 +52,6 @@ mod proto {
                 value: m.encode_to_vec(),
             }
         }
-    }
-
-    #[derive(Clone, Copy, PartialEq, Message)]
-    pub struct Height {
-        #[prost(uint64, tag = "1")]
-        pub revision_number: u64,
-        #[prost(uint64, tag = "2")]
-        pub revision_height: u64,
-    }
-
-    #[derive(Clone, PartialEq, Message)]
-    pub struct WasmClientState {
-        #[prost(bytes = "vec", tag = "1")]
-        pub data: Vec<u8>,
-        #[prost(bytes = "vec", tag = "2")]
-        pub checksum: Vec<u8>,
-        #[prost(message, optional, tag = "3")]
-        pub latest_height: Option<Height>,
     }
 
     /// Same shape for `wasm.v1.ConsensusState` and `wasm.v1.ClientMessage`.
@@ -486,4 +469,62 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
     }
     print_body(messages);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{height, proto};
+    use prost::Message;
+
+    #[test]
+    fn wasm_client_state_encoding() {
+        let state = proto::WasmClientState {
+            data: vec![0x12, 0x34],
+            checksum: vec![0xab, 0xcd],
+            latest_height: height(129),
+        };
+        assert_eq!(
+            state.encode_to_vec(),
+            [
+                0x0a, 0x02, 0x12, 0x34, 0x12, 0x02, 0xab, 0xcd, 0x1a, 0x03, 0x10, 0x81, 0x01
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_height_presence_encoding() {
+        let mut state = proto::WasmClientState::default();
+        assert!(state.encode_to_vec().is_empty());
+        state.latest_height = height(0);
+        assert_eq!(state.encode_to_vec(), [0x1a, 0x00]);
+
+        let mut recv = proto::MsgRecvPacket::default();
+        assert!(recv.encode_to_vec().is_empty());
+        recv.proof_height = height(0);
+        assert_eq!(recv.encode_to_vec(), [0x1a, 0x00]);
+
+        let mut ack = proto::MsgAcknowledgement::default();
+        assert!(ack.encode_to_vec().is_empty());
+        ack.proof_height = height(0);
+        assert_eq!(ack.encode_to_vec(), [0x22, 0x00]);
+    }
+
+    #[test]
+    fn proof_height_encoding() {
+        let proof_height = height(129);
+        assert_eq!(proof_height.unwrap().revision_number, 0);
+        assert_eq!(proof_height.unwrap().encode_to_vec(), [0x10, 0x81, 0x01]);
+
+        let recv = proto::MsgRecvPacket {
+            proof_height,
+            ..Default::default()
+        };
+        assert_eq!(recv.encode_to_vec(), [0x1a, 0x03, 0x10, 0x81, 0x01]);
+
+        let ack = proto::MsgAcknowledgement {
+            proof_height,
+            ..Default::default()
+        };
+        assert_eq!(ack.encode_to_vec(), [0x22, 0x03, 0x10, 0x81, 0x01]);
+    }
 }
