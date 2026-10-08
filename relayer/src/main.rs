@@ -36,6 +36,7 @@ use alloy::{
     rpc::types::{Filter, Log},
     signers::local::PrivateKeySigner,
     sol_types::{SolEvent, SolValue},
+    transports::TransportResult,
 };
 use cw_commonware::membership::commitment_slot;
 use eyre::{Context as _, eyre};
@@ -83,6 +84,17 @@ struct CertifiedBlockInner {
     header: TempoHeader,
 }
 
+impl CertifiedBlock {
+    async fn fetch(provider: &impl Provider, height: u64) -> TransportResult<Self> {
+        provider
+            .raw_request(
+                "consensus_getFinalization".into(),
+                (serde_json::json!({ "height": height }),),
+            )
+            .await
+    }
+}
+
 impl Chain {
     async fn connect(prefix: &str) -> eyre::Result<Self> {
         let var = |k: &str| {
@@ -122,12 +134,7 @@ impl Chain {
 
     /// Update message proving this chain's finalized block at `height` to a CommonwareLightClient.
     async fn update_msg(&self, height: u64) -> eyre::Result<Bytes> {
-        let fin: CertifiedBlock = self
-            .provider
-            .raw_request(
-                "consensus_getFinalization".into(),
-                (serde_json::json!({ "height": height }),),
-            )
+        let fin = CertifiedBlock::fetch(&self.provider, height)
             .await
             .wrap_err_with(|| format!("{}: consensus_getFinalization {height}", self.name))?;
         // Re-encode the header ourselves. build_update checks keccak(rlp) == certified digest.
@@ -493,4 +500,105 @@ async fn main() -> eyre::Result<()> {
         relay(Kind::Acks, b, a),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod finalization_rpc_request_tests {
+    use super::*;
+    use alloy::transports::{TransportError, mock::Asserter};
+    use serde_json::{Value, json};
+    use tokio::time::timeout;
+
+    pub(super) fn fixture() -> Value {
+        serde_json::from_str(include_str!("../../contracts/test/fixtures/lc.json")).unwrap()
+    }
+
+    pub(super) fn bytes(value: &Value) -> Bytes {
+        value.as_str().unwrap().parse().unwrap()
+    }
+
+    pub(super) fn response(update: &Value) -> Value {
+        let header: TempoHeader = alloy_rlp::decode_exact(bytes(&update["headerRlp"])).unwrap();
+        json!({ "certificate": update["tempoCertificate"], "block": { "header": header } })
+    }
+
+    pub(super) fn rpc_cause<'a>(error: &'a eyre::Report, context: &str) -> &'a TransportError {
+        assert_eq!(error.to_string(), context);
+        error.chain().nth(1).unwrap().downcast_ref().unwrap()
+    }
+
+    fn chain(asserter: &Asserter, epoch_length: u64) -> Chain {
+        Chain {
+            name: "source".into(),
+            provider: ProviderBuilder::new()
+                .connect_mocked_client(asserter.clone())
+                .erased(),
+            router: Address::ZERO,
+            client_id: "client-0".into(),
+            epoch_length,
+            from_block: 0,
+            tx_lock: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_msg_matches_fixture() {
+        let fixture = fixture();
+        let asserter = Asserter::new();
+        let chain = chain(&asserter, fixture["epochLength"].as_u64().unwrap());
+        // Asserter checks response consumption, not the request method or parameters.
+        for (i, update) in fixture["updates"].as_array().unwrap().iter().enumerate() {
+            asserter.push_success(&response(update));
+            let encoded = timeout(
+                Duration::from_secs(1),
+                chain.update_msg(update["height"].as_u64().unwrap()),
+            )
+            .await
+            .expect("update_msg timed out")
+            .unwrap();
+            let msg = abi::MsgUpdateClient::abi_decode(&encoded).unwrap();
+            assert_eq!(msg.headerRlp, bytes(&update["headerRlp"]));
+            assert_eq!(msg.signature, bytes(&update["voteSignature"]));
+            assert_eq!(msg.viewNumber, update["view"].as_u64().unwrap());
+            assert_eq!(msg.parentView, update["parentView"].as_u64().unwrap());
+            let next_key = if i == 1 {
+                bytes(&fixture["epoch1Key"])
+            } else {
+                vec![0; 256].into()
+            };
+            assert_eq!(Bytes::from(msg.nextGroupKey.abi_encode()), next_key);
+            assert_eq!(encoded.as_ref(), msg.abi_encode());
+            assert!(asserter.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn update_msg_preserves_rpc_errors() {
+        let asserter = Asserter::new();
+        let chain = chain(&asserter, 10);
+        let context = format!("source: consensus_getFinalization {}", u64::MAX);
+
+        asserter.push_failure_msg("finalization unavailable");
+        let error = timeout(Duration::from_secs(1), chain.update_msg(u64::MAX))
+            .await
+            .expect("update_msg timed out")
+            .unwrap_err();
+        let payload = rpc_cause(&error, &context).as_error_resp().unwrap();
+        assert_eq!(payload.code, -32603);
+        assert_eq!(payload.message, "finalization unavailable");
+        assert!(asserter.read_q().is_empty());
+
+        let malformed = json!({ "certificate": "0x", "block": {} });
+        asserter.push_success(&malformed);
+        let error = timeout(Duration::from_secs(1), chain.update_msg(u64::MAX))
+            .await
+            .expect("update_msg timed out")
+            .unwrap_err();
+        let TransportError::DeserError { err, text } = rpc_cause(&error, &context) else {
+            panic!("expected the original deserialization error: {error:?}");
+        };
+        assert!(err.to_string().contains("missing field `header`"));
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), malformed);
+        assert!(asserter.read_q().is_empty());
+    }
 }

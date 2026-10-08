@@ -187,12 +187,7 @@ impl Bankd {
     }
 
     async fn finalization(&self, height: u64) -> eyre::Result<Header> {
-        let fin: CertifiedBlock = self
-            .provider
-            .raw_request(
-                "consensus_getFinalization".into(),
-                (serde_json::json!({ "height": height }),),
-            )
+        let fin = CertifiedBlock::fetch(&self.provider, height)
             .await
             .wrap_err_with(|| format!("consensus_getFinalization {height}"))?;
         let rlp = Bytes::from(alloy_rlp::encode(&fin.block.header));
@@ -483,4 +478,102 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
     }
     print_body(messages);
     Ok(())
+}
+
+#[cfg(test)]
+mod finalization_rpc_request_tests {
+    use super::*;
+    use crate::finalization_rpc_request_tests::{bytes, fixture, response, rpc_cause};
+    use alloy::transports::{TransportError, mock::Asserter};
+    use serde_json::{Value, json};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    fn bankd(asserter: &Asserter, epoch_length: u64) -> Bankd {
+        Bankd {
+            provider: ProviderBuilder::new()
+                .connect_mocked_client(asserter.clone())
+                .erased(),
+            router: Address::ZERO,
+            epoch_length,
+            signer: "cosmos1relayer".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn finalization_matches_fixture() {
+        let fixture = fixture();
+        let asserter = Asserter::new();
+        let bankd = bankd(&asserter, fixture["epochLength"].as_u64().unwrap());
+        for update in fixture["updates"].as_array().unwrap() {
+            asserter.push_success(&response(update));
+            let header = timeout(
+                Duration::from_secs(1),
+                bankd.finalization(update["height"].as_u64().unwrap()),
+            )
+            .await
+            .expect("finalization timed out")
+            .unwrap();
+            assert_eq!(
+                header,
+                Header {
+                    header_rlp: bytes(&update["headerRlp"]),
+                    certificate: bytes(&update["tempoCertificate"]),
+                }
+            );
+            assert!(asserter.read_q().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn finalization_preserves_rpc_errors() {
+        let asserter = Asserter::new();
+        let bankd = bankd(&asserter, 10);
+        let context = format!("consensus_getFinalization {}", u64::MAX);
+
+        asserter.push_failure_msg("finalization unavailable");
+        let error = timeout(Duration::from_secs(1), bankd.finalization(u64::MAX))
+            .await
+            .expect("finalization timed out")
+            .unwrap_err();
+        let payload = rpc_cause(&error, &context).as_error_resp().unwrap();
+        assert_eq!(payload.code, -32603);
+        assert_eq!(payload.message, "finalization unavailable");
+        assert!(asserter.read_q().is_empty());
+
+        let malformed = json!({ "certificate": "0x", "block": {} });
+        asserter.push_success(&malformed);
+        let error = timeout(Duration::from_secs(1), bankd.finalization(u64::MAX))
+            .await
+            .expect("finalization timed out")
+            .unwrap_err();
+        let TransportError::DeserError { err, text } = rpc_cause(&error, &context) else {
+            panic!("expected the original deserialization error: {error:?}");
+        };
+        assert!(err.to_string().contains("missing field `header`"));
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), malformed);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalization_rejects_header_certificate_mismatch() {
+        let fixture = fixture();
+        let asserter = Asserter::new();
+        let bankd = bankd(&asserter, fixture["epochLength"].as_u64().unwrap());
+        let update = &fixture["updates"][0];
+        let mut mismatched = response(update);
+        mismatched["certificate"] = fixture["updates"][1]["tempoCertificate"].clone();
+        asserter.push_success(&mismatched);
+
+        let error = timeout(
+            Duration::from_secs(1),
+            bankd.finalization(update["height"].as_u64().unwrap()),
+        )
+        .await
+        .expect("finalization timed out")
+        .unwrap_err();
+        assert_eq!(error.to_string(), "header hash != certified digest");
+        assert_eq!(error.chain().count(), 1);
+        assert!(asserter.read_q().is_empty());
+    }
 }
