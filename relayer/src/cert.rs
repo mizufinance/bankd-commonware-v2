@@ -103,6 +103,8 @@ pub fn g2_point(compressed: &[u8]) -> eyre::Result<G2Point> {
 mod tests {
     use super::*;
     use alloy::sol_types::SolValue as _;
+    use commonware_codec::{FixedSize as _, types::lazy::Lazy};
+    use commonware_consensus::simplex::scheme::bls12381_threshold::vrf::Signature;
 
     fn fixture() -> serde_json::Value {
         let path = concat!(
@@ -116,6 +118,15 @@ mod tests {
         v.as_str().unwrap().parse().unwrap()
     }
 
+    /// Changes only the claimed payload, retaining the fixture signature. This does not create
+    /// a valid signature for the new header: `build_update` decodes signatures without verifying them.
+    fn certificate_with_header_hash(update: &serde_json::Value, header_rlp: &[u8]) -> String {
+        let raw = bytes(&update["tempoCertificate"]);
+        let mut fin = TempoFinalization::decode(raw.as_ref()).unwrap();
+        fin.proposal.payload = sha256::Digest(keccak256(header_rlp).0);
+        hex::encode(fin.encode())
+    }
+
     /// The raw tempo certificate bytes turn into exactly what the forge tests submit.
     #[test]
     fn build_update_matches_fixture() {
@@ -127,14 +138,111 @@ mod tests {
             assert_eq!(m.signature, bytes(&u["voteSignature"]), "update {i}");
             assert_eq!(m.viewNumber, u["view"].as_u64().unwrap());
             assert_eq!(m.parentView, u["parentView"].as_u64().unwrap());
-            if i == 1 {
+            let height = u["height"].as_u64().unwrap();
+            if (height + 1) % epoch_length == 0 {
                 // Boundary: next key comes out of extra_data.
                 assert_eq!(
                     Bytes::from(m.nextGroupKey.abi_encode()),
                     bytes(&f["epoch1Key"])
                 );
+            } else {
+                assert_eq!(m.nextGroupKey.abi_encode(), [0u8; 256], "update {i}");
             }
         }
+    }
+
+    #[test]
+    fn build_update_rejects_malformed_certificate_hex() {
+        let err = build_update("0xzz", Bytes::new(), 10).err().unwrap();
+        assert_eq!(err.to_string(), "certificate hex");
+    }
+
+    #[test]
+    fn build_update_rejects_truncated_finalization() {
+        let f = fixture();
+        let u = &f["updates"][0];
+        let raw = bytes(&u["tempoCertificate"]);
+        let cert = hex::encode(&raw[..raw.len() - 1]);
+        let err = build_update(
+            &cert,
+            bytes(&u["headerRlp"]),
+            f["epochLength"].as_u64().unwrap(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            err.to_string().starts_with("decode finalization: "),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_update_rejects_header_hash_mismatch_before_rlp_decode() {
+        let f = fixture();
+        let cert = f["updates"][0]["tempoCertificate"].as_str().unwrap();
+        // Both a different valid header and invalid RLP must fail the hash check first.
+        for header_rlp in [
+            bytes(&f["updates"][1]["headerRlp"]),
+            Bytes::from_static(&[0xff]),
+        ] {
+            let err = build_update(cert, header_rlp, f["epochLength"].as_u64().unwrap())
+                .err()
+                .unwrap();
+            assert_eq!(err.to_string(), "header hash != certified digest");
+        }
+    }
+
+    #[test]
+    fn build_update_rejects_invalid_header_with_matching_hash() {
+        let f = fixture();
+        let header_rlp = Bytes::from_static(&[0xff]);
+        let cert = certificate_with_header_hash(&f["updates"][0], &header_rlp);
+        let err = build_update(&cert, header_rlp, f["epochLength"].as_u64().unwrap())
+            .err()
+            .unwrap();
+        assert!(err.to_string().starts_with("decode header: "), "{err}");
+    }
+
+    #[test]
+    fn build_update_decodes_dkg_only_at_epoch_boundaries() {
+        let f = fixture();
+        let epoch_length = f["epochLength"].as_u64().unwrap();
+        for u in f["updates"].as_array().unwrap() {
+            let mut header: TempoHeader =
+                alloy_rlp::Decodable::decode(&mut bytes(&u["headerRlp"]).as_ref()).unwrap();
+            header.inner.extra_data = Bytes::from_static(&[0xff]);
+            let header_rlp: Bytes = alloy_rlp::encode(header).into();
+            let cert = certificate_with_header_hash(u, &header_rlp);
+            let result = build_update(&cert, header_rlp, epoch_length);
+            let height = u["height"].as_u64().unwrap();
+            if (height + 1) % epoch_length == 0 {
+                let err = result.err().unwrap();
+                assert!(err.to_string().starts_with("decode dkg outcome: "), "{err}");
+            } else {
+                let m = result.unwrap();
+                assert_eq!(m.nextGroupKey.abi_encode(), [0u8; 256], "height {height}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_update_rejects_undecodable_signature() {
+        let f = fixture();
+        let u = &f["updates"][0];
+        let raw = bytes(&u["tempoCertificate"]);
+        let mut fin = TempoFinalization::decode(raw.as_ref()).unwrap();
+        // Preserve the encoded length so finalization decoding defers the invalid point check.
+        let mut malformed = &[0u8; Signature::<MinSig>::SIZE][..];
+        fin.certificate.signature = Lazy::deferred(&mut malformed, ());
+        let cert = hex::encode(fin.encode());
+        let err = build_update(
+            &cert,
+            bytes(&u["headerRlp"]),
+            f["epochLength"].as_u64().unwrap(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err.to_string(), "bad certificate signature");
     }
 
     #[test]
