@@ -260,17 +260,138 @@ impl Bankd {
                 .ok_or_else(|| eyre!("account proof has no leaf"))?;
             let proofs = p
                 .storage_proof
-                .iter()
+                .into_iter()
                 .map(|s| {
                     eyre::ensure!(!s.value.is_zero(), "commitment missing at {tip}");
                     Ok(MembershipProof {
                         account: account.clone(),
                         account_proof: p.account_proof.clone(),
-                        storage_proof: s.proof.clone(),
+                        storage_proof: s.proof,
                     })
                 })
                 .collect::<eyre::Result<_>>()?;
             return Ok((tip, proofs));
+        }
+    }
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use std::time::Duration;
+
+    use alloy::{
+        primitives::{U64, U256},
+        rpc::types::{EIP1186AccountProofResponse, EIP1186StorageProof},
+        transports::mock::Asserter,
+    };
+
+    use super::*;
+
+    fn response(storage_proof: Vec<EIP1186StorageProof>) -> EIP1186AccountProofResponse {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../contracts/test/fixtures/lc.json")).unwrap();
+        EIP1186AccountProofResponse {
+            address: fixture["router"].as_str().unwrap().parse().unwrap(),
+            account_proof: serde_json::from_value(fixture["accountProof"].clone()).unwrap(),
+            storage_proof,
+            ..Default::default()
+        }
+    }
+
+    async fn tip_proofs(
+        response: EIP1186AccountProofResponse,
+        paths: &[Vec<u8>],
+    ) -> eyre::Result<(u64, Vec<MembershipProof>)> {
+        let asserter = Asserter::new();
+        asserter.push_success(&U64::from(42));
+        asserter.push_success(&response);
+        let bankd = Bankd {
+            provider: ProviderBuilder::new()
+                .connect_mocked_client(asserter.clone())
+                .erased(),
+            router: response.address,
+            epoch_length: 10,
+            signer: "test".into(),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), bankd.tip_proofs(paths))
+            .await
+            .expect("mocked tip_proofs timed out");
+        assert!(asserter.read_q().is_empty());
+        result
+    }
+
+    #[tokio::test]
+    async fn tip_proofs_preserves_response_order_and_account() {
+        let paths = [b"first".to_vec(), b"second".to_vec()];
+        // Distinct synthetic storage nodes exercise packaging, not MPT validity.
+        let storage_proofs = [
+            vec![
+                Bytes::from_static(b"second-1"),
+                Bytes::from_static(b"second-2"),
+            ],
+            vec![Bytes::from_static(b"first")],
+        ];
+        let response = response(vec![
+            EIP1186StorageProof {
+                key: commitment_slot(&paths[1]).into(),
+                value: U256::from(2),
+                proof: storage_proofs[0].clone(),
+            },
+            EIP1186StorageProof {
+                key: commitment_slot(&paths[0]).into(),
+                value: U256::from(1),
+                proof: storage_proofs[1].clone(),
+            },
+        ]);
+        let account_proof = response.account_proof.clone();
+        // RLP account value carried by lc.json's account leaf.
+        let account: Bytes = "0xf8448080a069e05540a8350053f1e4f8bf9e8bc8cdd9f3c64b91f7cc3c3828ad936a56c65da0bc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a"
+            .parse().unwrap();
+
+        let (tip, proofs) = tip_proofs(response, &paths).await.unwrap();
+        assert_eq!(tip, 42);
+        assert_eq!(proofs.len(), storage_proofs.len());
+        for (proof, storage_proof) in proofs.iter().zip(storage_proofs) {
+            assert_eq!(proof.account, account);
+            assert_eq!(proof.account_proof, account_proof);
+            assert_eq!(proof.storage_proof, storage_proof);
+        }
+    }
+
+    #[tokio::test]
+    async fn tip_proofs_accepts_empty_storage_proofs() {
+        let (tip, proofs) = tip_proofs(response(vec![]), &[b"path".to_vec()])
+            .await
+            .unwrap();
+        assert_eq!(tip, 42);
+        assert!(proofs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tip_proofs_rejects_zero_values() {
+        for missing in 0..2 {
+            let mut response = response(vec![
+                EIP1186StorageProof {
+                    value: U256::from(1),
+                    ..Default::default()
+                };
+                2
+            ]);
+            response.storage_proof[missing].value = U256::ZERO;
+            let error = tip_proofs(response, &[b"first".to_vec(), b"second".to_vec()])
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "commitment missing at 42");
+        }
+    }
+
+    #[tokio::test]
+    async fn tip_proofs_requires_account_leaf_before_storage_checks() {
+        for storage_proof in [vec![], vec![EIP1186StorageProof::default()]] {
+            let mut response = response(storage_proof);
+            response.account_proof.pop();
+            let error = tip_proofs(response, &[b"path".to_vec()]).await.unwrap_err();
+            assert_eq!(error.to_string(), "account proof has no leaf");
         }
     }
 }
