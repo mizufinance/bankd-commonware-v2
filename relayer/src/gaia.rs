@@ -17,17 +17,17 @@ use alloy::{
     eips::BlockNumberOrTag,
     primitives::{Address, B256, Bytes, keccak256},
     providers::{DynProvider, Provider, ProviderBuilder},
-    sol_types::{SolEvent, SolValue},
+    sol_types::SolEvent,
 };
 use cw_commonware::{
-    membership::account_from_proof,
+    membership::{account_from_proof, commitment_slot},
     types::{ClientState, ConsensusState, EpochKey, Header, MembershipProof},
     verify::dkg_outcome_identity,
 };
 use eyre::{Context as _, eyre};
 use prost::Message;
 
-use crate::{CertifiedBlock, IBCSTORE_SLOT, POLL, abi, commitment_path, hex_u64};
+use crate::{CertifiedBlock, POLL, abi, commitment_path, hex_u64};
 
 /// Simplex namespace bankd signs with (crates/consensus NAMESPACE).
 const NAMESPACE: &[u8] = b"TEMPO";
@@ -243,10 +243,7 @@ impl Bankd {
     /// Proofs of `paths` in the router at the tip. reth only serves proofs at the tip by default,
     /// so snapshot first and let the caller wait for finality.
     async fn tip_proofs(&self, paths: &[Vec<u8>]) -> eyre::Result<(u64, Vec<MembershipProof>)> {
-        let slots: Vec<B256> = paths
-            .iter()
-            .map(|p| keccak256((keccak256(p), IBCSTORE_SLOT).abi_encode()))
-            .collect();
+        let slots: Vec<B256> = paths.iter().map(|p| commitment_slot(p)).collect();
         loop {
             let tip = self.provider.get_block_number().await?;
             let Ok(p) = self
