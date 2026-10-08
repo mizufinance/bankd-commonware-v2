@@ -37,6 +37,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol_types::{SolEvent, SolValue},
 };
+use cw_commonware::membership::commitment_slot;
 use eyre::{Context as _, eyre};
 use futures::StreamExt as _;
 use serde::Deserialize;
@@ -48,9 +49,6 @@ use abi::{
     MsgRecvPacket, Packet,
 };
 
-/// ERC-7201 base slot of IBCStoreUpgradeable (commitments mapping).
-const IBCSTORE_SLOT: B256 =
-    alloy::primitives::b256!("1260944489272988d9df285149b5aa1b0f48f2136d6f416159f840a3e0747600");
 const POLL: Duration = Duration::from_millis(250);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -144,7 +142,7 @@ impl Chain {
     /// eth_getProof of a commitment path at the current tip. reth only serves proofs for the tip by
     /// default (eth-proof-window 0), so snapshot now and wait for finality afterwards.
     async fn tip_proof(&self, path: &[u8]) -> eyre::Result<(u64, Bytes)> {
-        let slot = keccak256((keccak256(path), IBCSTORE_SLOT).abi_encode());
+        let slot = commitment_slot(path);
         loop {
             let tip = self.provider.get_block_number().await?;
             match self
@@ -211,6 +209,39 @@ async fn update_client(src: &Chain, dst: &Chain, height: u64) -> eyre::Result<()
 
 fn commitment_path(client: &str, kind: u8, sequence: u64) -> Vec<u8> {
     [client.as_bytes(), &[kind], &sequence.to_be_bytes()].concat()
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use alloy::primitives::{B256, b256, hex};
+
+    use super::{commitment_path, commitment_slot};
+
+    #[test]
+    fn commitment_slot_matches_contract_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../contracts/test/fixtures/e2e.json")).unwrap();
+        let path = hex::decode(fixture["commitmentPath"].as_str().unwrap()).unwrap();
+        let slot: B256 = fixture["slot"].as_str().unwrap().parse().unwrap();
+
+        assert_eq!(commitment_path("client-0", 1, 1), path);
+        assert_eq!(commitment_slot(&path), slot);
+    }
+
+    #[test]
+    fn commitment_slot_matches_empty_and_ack_vectors() {
+        assert_eq!(
+            commitment_slot(&[]),
+            b256!("a005ec606aecc4ec354e094ae6a9bb223d1db521b1a69d7d0ce57510176fdee2")
+        );
+
+        let path = hex!("636c69656e742d3003ffffffffffffffff");
+        assert_eq!(commitment_path("client-0", 3, u64::MAX), path);
+        assert_eq!(
+            commitment_slot(&path),
+            b256!("db6bf740e4e7597fc221e30f5e6448e11677c3ca6282de0d06215676849070e9")
+        );
+    }
 }
 
 /// Which events a relay task follows. Packets: SendPacket on src -> recvPacket on dst.
