@@ -27,7 +27,7 @@ use cw_commonware::{
 use eyre::{Context as _, eyre};
 use prost::Message;
 
-use crate::{CertifiedBlock, POLL, abi, commitment_path, hex_u64};
+use crate::{CertifiedBlock, POLL, abi, commitment_path, finalized_height};
 
 /// Simplex namespace bankd signs with (crates/consensus NAMESPACE).
 const NAMESPACE: &[u8] = b"TEMPO";
@@ -207,14 +207,6 @@ impl Bankd {
         })
     }
 
-    async fn finalized_height(&self) -> eyre::Result<u64> {
-        let b: serde_json::Value = self
-            .provider
-            .raw_request("eth_getBlockByNumber".into(), ("finalized", false))
-            .await?;
-        hex_u64(&b["number"])
-    }
-
     /// Compressed group key of `epoch`: genesis extra_data for epoch 0, else the previous epoch's
     /// boundary header. Parsed with the light client's own decoder.
     async fn group_key(&self, epoch: u64) -> eyre::Result<EpochKey> {
@@ -298,7 +290,7 @@ pub async fn create_client() -> eyre::Result<()> {
     let bankd = Bankd::from_env().await?;
     let checksum =
         alloy::primitives::hex::decode(std::env::var("WASM_CHECKSUM").wrap_err("WASM_CHECKSUM")?)?;
-    let h = bankd.finalized_height().await?;
+    let h = finalized_height(&bankd.provider).await?;
     let fin = bankd.finalization(h).await?;
     let header =
         cw_commonware::header::TempoHeader::decode(&fin.header_rlp).map_err(|e| eyre!("{e}"))?;
@@ -413,7 +405,7 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
         })
         .collect();
     let (proof_height, proofs) = bankd.tip_proofs(&paths).await?;
-    while bankd.finalized_height().await? < proof_height {
+    while finalized_height(&bankd.provider).await? < proof_height {
         tokio::time::sleep(POLL).await;
     }
 
