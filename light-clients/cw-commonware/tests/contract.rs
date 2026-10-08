@@ -231,6 +231,38 @@ fn membership_and_non_membership() {
 }
 
 #[test]
+fn membership_and_non_membership_reject_invalid_path_lengths() {
+    let (mut deps, f) = setup();
+    update(&mut deps, &f, 0).unwrap();
+
+    let value = hex::decode(s(&f["commitment"]).trim_start_matches("0x")).unwrap();
+    for path_len in [0, 2] {
+        let mut m = membership(&f, value.clone().into());
+        if let SudoMsg::VerifyMembership(ref mut v) = m {
+            v.merkle_path.key_path.resize(path_len, Binary::default());
+        }
+        assert_eq!(
+            sudo(deps.as_mut(), mock_env(), m).unwrap_err(),
+            Error::InvalidPath
+        );
+
+        let mut merkle_path = path(&f, "absentPath");
+        merkle_path.key_path.resize(path_len, Binary::default());
+        let m = SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
+            height: height(3),
+            delay_time_period: 0,
+            delay_block_period: 0,
+            proof: proof(&f, "absentStorageProof"),
+            merkle_path,
+        });
+        assert_eq!(
+            sudo(deps.as_mut(), mock_env(), m).unwrap_err(),
+            Error::InvalidPath
+        );
+    }
+}
+
+#[test]
 fn queries_and_freeze() {
     let (mut deps, f) = setup();
     update(&mut deps, &f, 0).unwrap();
