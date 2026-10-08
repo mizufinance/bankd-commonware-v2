@@ -110,11 +110,12 @@ pub fn verify_header(
 /// The signed bytes: `varint(len(ns)) ns varint(epoch) varint(view) varint(parent) payload`,
 /// where `ns` is the namespace with the `_FINALIZE` suffix.
 pub fn finalize_message(namespace: &[u8], fin: &Finalization) -> Vec<u8> {
-    let mut ns = namespace.to_vec();
-    ns.extend_from_slice(b"_FINALIZE");
-    let mut out = Vec::with_capacity(ns.len() + 64);
-    write_varint(ns.len() as u64, &mut out);
-    out.extend_from_slice(&ns);
+    let suffix = b"_FINALIZE";
+    let namespace_len = namespace.len() + suffix.len();
+    let mut out = Vec::with_capacity(namespace_len + 64);
+    write_varint(namespace_len as u64, &mut out);
+    out.extend_from_slice(namespace);
+    out.extend_from_slice(suffix);
     write_varint(fin.epoch, &mut out);
     write_varint(fin.view, &mut out);
     write_varint(fin.parent, &mut out);
