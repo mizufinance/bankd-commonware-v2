@@ -2,7 +2,7 @@
 //! an MPT account proof for the ICS26 router, then a storage proof for the commitment slot.
 
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use alloy_rlp::{Decodable, Encodable};
+use alloy_rlp::Decodable;
 use alloy_trie::{nodes::TrieNode, proof::verify_proof, Nibbles};
 
 use crate::{types::MembershipProof, Error};
@@ -48,9 +48,7 @@ pub fn verify(
         Some(v) => {
             let v: [u8; 32] = v.try_into().map_err(|_| Error::InvalidValueLength)?;
             // Storage leaves hold rlp(uint256), leading zeros stripped. A zero value is absence.
-            let mut out = Vec::new();
-            U256::from_be_bytes(v).encode(&mut out);
-            Some(out)
+            Some(alloy_rlp::encode(U256::from_be_bytes(v)))
         }
         None => None,
     };
