@@ -28,9 +28,7 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap()
 }
 
-fn setup() -> (Deps, Value) {
-    let f = fx();
-    let mut deps = mock_dependencies();
+fn instantiate_msg(f: &Value) -> InstantiateMsg {
     let cs = json!({
         "router": f["router"],
         "namespace": f["namespace"],
@@ -39,18 +37,18 @@ fn setup() -> (Deps, Value) {
         "keys": [{"epoch": 0, "key": f["epoch0KeyCompressed"]}],
     });
     let consensus = json!({"timestamp": 0, "state_root": format!("0x{}", "00".repeat(32))});
+    InstantiateMsg {
+        client_state: to_json_vec(&cs).unwrap().into(),
+        consensus_state: to_json_vec(&consensus).unwrap().into(),
+        checksum: Binary::from(vec![7u8; 32]),
+    }
+}
+
+fn setup() -> (Deps, Value) {
+    let f = fx();
+    let mut deps = mock_dependencies();
     let info = message_info(&deps.api.addr_make("ibc"), &[]);
-    instantiate(
-        deps.as_mut(),
-        mock_env(),
-        info,
-        InstantiateMsg {
-            client_state: to_json_vec(&cs).unwrap().into(),
-            consensus_state: to_json_vec(&consensus).unwrap().into(),
-            checksum: Binary::from(vec![7u8; 32]),
-        },
-    )
-    .unwrap();
+    instantiate(deps.as_mut(), mock_env(), info, instantiate_msg(&f)).unwrap();
     (deps, f)
 }
 
@@ -133,6 +131,84 @@ fn membership(f: &Value, value: Binary) -> SudoMsg {
         merkle_path: path(f, "commitmentPath"),
         value,
     })
+}
+
+#[test]
+fn instantiate_rejects_invalid_initial_epochs_without_writes() {
+    // The same fixture succeeds before changing one epoch precondition at a time.
+    let (deps, f) = setup();
+    let initial = state::client_state(&deps.storage).unwrap();
+    assert!(initial.epoch_length > 0);
+
+    let mut zero_epoch_length = initial.clone();
+    zero_epoch_length.epoch_length = 0;
+    let mut no_keys = initial.clone();
+    no_keys.keys.clear();
+    let mut missing_current_key = initial;
+    missing_current_key.latest_height = missing_current_key.epoch_length;
+
+    for (cs, expected) in [
+        (zero_epoch_length, Error::Decode("epoch_length is 0".into())),
+        (no_keys, Error::MissingKey),
+        (missing_current_key, Error::MissingKey),
+    ] {
+        let mut msg = instantiate_msg(&f);
+        msg.client_state = to_json_vec(&cs).unwrap().into();
+        let mut deps = mock_dependencies();
+        deps.storage.set(b"sentinel", b"untouched");
+        let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+        let info = message_info(&deps.api.addr_make("ibc"), &[]);
+
+        let err = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap_err();
+        assert_eq!(err, expected);
+        assert_eq!(
+            deps.storage
+                .range(None, None, Order::Ascending)
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+}
+
+#[test]
+fn instantiate_validates_every_configured_key_without_writes() {
+    let f = fx();
+    let mut msg = instantiate_msg(&f);
+    let mut cs: ClientState = serde_json::from_slice(&msg.client_state).unwrap();
+    cs.keys.push(
+        serde_json::from_value(json!({"epoch": 1, "key": f["epoch1KeyCompressed"]})).unwrap(),
+    );
+    msg.client_state = to_json_vec(&cs).unwrap().into();
+
+    // Both the current and unused future keys are accepted when their encodings are valid.
+    let mut deps = mock_dependencies();
+    let info = message_info(&deps.api.addr_make("ibc"), &[]);
+    instantiate(deps.as_mut(), mock_env(), info, msg.clone()).unwrap();
+    assert_eq!(state::client_state(&deps.storage).unwrap(), cs);
+
+    for key_index in 0..cs.keys.len() {
+        let mut invalid = cs.clone();
+        // This preserves the JSON schema and compressed length, but is not a G2 point.
+        invalid.keys[key_index].key = [0u8; 96].into();
+        let mut invalid_msg = msg.clone();
+        invalid_msg.client_state = to_json_vec(&invalid).unwrap().into();
+        let mut deps = mock_dependencies();
+        deps.storage.set(b"sentinel", b"untouched");
+        let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+        let info = message_info(&deps.api.addr_make("ibc"), &[]);
+
+        let err = instantiate(deps.as_mut(), mock_env(), info, invalid_msg).unwrap_err();
+        assert!(
+            matches!(err, Error::Bls(ref diagnostic) if !diagnostic.is_empty()),
+            "{err}"
+        );
+        assert_eq!(
+            deps.storage
+                .range(None, None, Order::Ascending)
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
 }
 
 #[test]
