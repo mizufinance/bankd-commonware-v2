@@ -356,7 +356,7 @@ fn to_proto(p: abi::Packet) -> proto::Packet {
                 destination_port: p.destPort,
                 version: p.version,
                 encoding: p.encoding,
-                value: p.value.to_vec(),
+                value: p.value.into(),
             })
             .collect(),
     }
@@ -471,7 +471,7 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
                     &proto::MsgAcknowledgement {
                         packet: Some(to_proto(p)),
                         acknowledgement: Some(proto::Acknowledgement {
-                            app_acknowledgements: acks.into_iter().map(|a| a.to_vec()).collect(),
+                            app_acknowledgements: acks.into_iter().map(Vec::from).collect(),
                         }),
                         proof_acked: proof,
                         proof_height: height(proof_height),
@@ -483,4 +483,104 @@ pub async fn relay(tx: &str) -> eyre::Result<()> {
     }
     print_body(messages);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{abi, to_proto};
+    use alloy::primitives::{Bytes, hex};
+    use prost::Message as _;
+
+    #[test]
+    fn packet_preserves_metadata_and_payload_wire_bytes() {
+        let packet = abi::Packet {
+            sequence: 150,
+            sourceClient: "bankd-0".into(),
+            destClient: "08-wasm-1".into(),
+            timeoutTimestamp: 16_384,
+            payloads: vec![
+                abi::Payload {
+                    sourcePort: "transfer".into(),
+                    destPort: "bank".into(),
+                    version: "ics20-1".into(),
+                    encoding: "abi".into(),
+                    value: Bytes::from(vec![0x00, 0xff, 0x80, 0x01]),
+                },
+                abi::Payload {
+                    sourcePort: "bank".into(),
+                    destPort: "transfer".into(),
+                    version: "v2".into(),
+                    encoding: "json".into(),
+                    value: Bytes::from_static(&[0x7f, 0x00]),
+                },
+            ],
+        };
+        // Literal wire bytes: packet fields 1-4, then two field-5 payloads
+        // of 36 and 30 bytes, each containing payload fields 1-5 in order.
+        let expected = hex!(
+            "089601120762616e6b642d301a0930382d7761736d2d3120808001"
+            "2a240a087472616e73666572120462616e6b1a0769637332302d3122036162692a0400ff8001"
+            "2a1e0a0462616e6b12087472616e736665721a02763222046a736f6e2a027f00"
+        );
+        assert_eq!(to_proto(packet).encode_to_vec(), expected);
+    }
+
+    #[test]
+    fn packet_preserves_shared_sliced_and_empty_payloads_in_order() {
+        let shared = Bytes::from(vec![0x10, 0x00, 0xff, 0x20]);
+        let values = [
+            shared.clone(),
+            shared.slice(1..3),
+            Bytes::from(vec![0xee, 0x7f, 0x00, 0xdd]).slice(1..3),
+            Bytes::new(),
+        ];
+        let packet = abi::Packet {
+            sequence: 0,
+            sourceClient: String::new(),
+            destClient: String::new(),
+            timeoutTimestamp: 0,
+            payloads: values
+                .into_iter()
+                .map(|value| abi::Payload {
+                    sourcePort: String::new(),
+                    destPort: String::new(),
+                    version: String::new(),
+                    encoding: String::new(),
+                    value,
+                })
+                .collect(),
+        };
+        // Empty scalar fields are omitted, but the fourth payload remains
+        // present as a zero-length message after the three binary values.
+        let expected = hex!("2a062a041000ff202a042a0200ff2a042a027f002a00");
+        assert_eq!(to_proto(packet).encode_to_vec(), expected);
+        assert_eq!(shared.as_ref(), &[0x10, 0x00, 0xff, 0x20]);
+    }
+
+    #[test]
+    fn packet_preserves_default_and_boundary_integer_wire_bytes() {
+        let cases: &[(u64, u64, &[u8])] = &[
+            (0, 0, &[]),
+            (127, 128, &hex!("087f208001")),
+            (
+                u64::MAX,
+                u64::MAX,
+                &hex!("08ffffffffffffffffff0120ffffffffffffffffff01"),
+            ),
+        ];
+        for &(sequence, timeout_timestamp, expected) in cases {
+            let packet = abi::Packet {
+                sequence,
+                sourceClient: String::new(),
+                destClient: String::new(),
+                timeoutTimestamp: timeout_timestamp,
+                payloads: Vec::new(),
+            };
+            assert_eq!(
+                to_proto(packet).encode_to_vec(),
+                expected,
+                "sequence={sequence}, timeout_timestamp={timeout_timestamp}"
+            );
+        }
+    }
 }
