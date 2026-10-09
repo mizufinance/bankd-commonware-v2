@@ -154,18 +154,112 @@ impl Chain {
                 Ok(p) => {
                     let storage = p
                         .storage_proof
-                        .first()
+                        .into_iter()
+                        .next()
                         .ok_or_else(|| eyre!("no storage proof"))?;
                     eyre::ensure!(!storage.value.is_zero(), "commitment missing at {tip}");
                     let proof = MembershipProof {
                         accountProof: p.account_proof,
-                        storageProof: storage.proof.clone(),
+                        storageProof: storage.proof,
                     };
                     return Ok((tip, proof.abi_encode().into()));
                 }
                 // Tip moved between the two calls, try again.
                 Err(_) => tokio::time::sleep(POLL).await,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use alloy::{
+        primitives::{U64, U256},
+        rpc::types::{EIP1186AccountProofResponse, EIP1186StorageProof},
+        transports::mock::Asserter,
+    };
+
+    use super::*;
+
+    async fn tip_proof(response: EIP1186AccountProofResponse) -> eyre::Result<(u64, Bytes)> {
+        let asserter = Asserter::new();
+        asserter.push_success(&U64::from(42));
+        asserter.push_success(&response);
+        let chain = Chain {
+            name: "test".into(),
+            provider: ProviderBuilder::new()
+                .connect_mocked_client(asserter.clone())
+                .erased(),
+            router: response.address,
+            client_id: "client-0".into(),
+            epoch_length: 10,
+            from_block: 0,
+            tx_lock: Arc::default(),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), chain.tip_proof(b"path"))
+            .await
+            .expect("mocked tip_proof timed out");
+        assert!(asserter.read_q().is_empty());
+        result
+    }
+
+    #[tokio::test]
+    async fn tip_proof_encodes_first_storage_proof() {
+        // Distinct synthetic nodes exercise packaging, not MPT validity.
+        let account_proof = vec![
+            Bytes::from_static(b"account-1"),
+            Bytes::from_static(b"account-2"),
+        ];
+        let storage_proof = vec![
+            Bytes::from_static(b"storage-1"),
+            Bytes::from_static(b"storage-2"),
+        ];
+        let response = EIP1186AccountProofResponse {
+            account_proof: account_proof.clone(),
+            storage_proof: vec![
+                EIP1186StorageProof {
+                    key: commitment_slot(b"path").into(),
+                    value: U256::from(1),
+                    proof: storage_proof.clone(),
+                },
+                // Additional entries are ignored, including their values.
+                EIP1186StorageProof {
+                    proof: vec![Bytes::from_static(b"ignored")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (tip, encoded) = tip_proof(response).await.unwrap();
+        assert_eq!(tip, 42);
+        let proof = MembershipProof::abi_decode(&encoded).unwrap();
+        assert_eq!(proof.accountProof, account_proof);
+        assert_eq!(proof.storageProof, storage_proof);
+    }
+
+    #[tokio::test]
+    async fn tip_proof_rejects_missing_commitment() {
+        for (storage_proof, expected) in [
+            (vec![], "no storage proof"),
+            (
+                vec![
+                    EIP1186StorageProof::default(),
+                    EIP1186StorageProof {
+                        value: U256::from(1),
+                        ..Default::default()
+                    },
+                ],
+                "commitment missing at 42",
+            ),
+        ] {
+            let error = tip_proof(EIP1186AccountProofResponse {
+                storage_proof,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
         }
     }
 }
