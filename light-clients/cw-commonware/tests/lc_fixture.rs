@@ -149,6 +149,57 @@ fn rejects_bad_certificates() {
 }
 
 #[test]
+fn rejects_certificate_epoch_and_round_mismatches() {
+    let f = Fixture::load();
+    let api = MockApi::default();
+    let k0 = f.key("epoch0KeyCompressed");
+    let (header, cert) = f.update(0);
+    let only_k0 = |e: u64| (e == 0).then_some(k0);
+    let params = f.params(0);
+    verify_header(&api, &params, only_k0, &header, &cert).unwrap();
+
+    let decoded = cw_commonware::header::TempoHeader::decode(&header).unwrap();
+    assert_eq!(params.epoch_length, 10);
+    assert_eq!(decoded.number, 3);
+    let ctx = decoded
+        .context
+        .expect("fixture header has consensus context");
+    assert_eq!((ctx.epoch, ctx.view, ctx.parent_view), (0, 4, 3));
+
+    // Guard the single-byte varints before changing one field. The payload and both
+    // signatures stay unchanged, so each case must fail its structural check first.
+    assert_eq!(cert.len(), 3 + 32 + 2 * 48);
+    assert_eq!(&cert[..3], &[0, 4, 3]);
+    for (field, offset, value, expected) in [
+        ("epoch", 0, 1, Error::EpochMismatch { cert: 1, header: 0 }),
+        ("view", 1, 5, Error::ContextMismatch),
+        ("parent", 2, 2, Error::ContextMismatch),
+    ] {
+        let mut changed = cert.clone();
+        changed[offset] = value;
+        let err = verify_header(&api, &params, only_k0, &header, &changed).unwrap_err();
+        assert_eq!(err, expected, "changed certificate {field}");
+    }
+}
+
+#[test]
+fn rejects_finalization_in_different_namespace() {
+    let f = Fixture::load();
+    let api = MockApi::default();
+    let k0 = f.key("epoch0KeyCompressed");
+    let (header, cert) = f.update(0);
+    let only_k0 = |e: u64| (e == 0).then_some(k0);
+    let mut params = f.params(0);
+    verify_header(&api, &params, only_k0, &header, &cert).unwrap();
+
+    let other_namespace = b"TEMPO_OTHER";
+    assert_ne!(params.namespace, other_namespace);
+    params.namespace = other_namespace;
+    let err = verify_header(&api, &params, only_k0, &header, &cert).unwrap_err();
+    assert_eq!(err, Error::InvalidSignature);
+}
+
+#[test]
 fn reads_dkg_outcome() {
     let f = Fixture::load();
     let (epoch, identity) = dkg_outcome_identity(&hex_bytes(&f.json["dkgOutcome"])).unwrap();
