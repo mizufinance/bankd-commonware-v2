@@ -23,6 +23,9 @@ Nam = "Nam"
 prool = "prool"
 Prool = "Prool"
 JOD = "JOD"
+shieldd = "shieldd"
+Shieldd = "Shieldd"
+SHIELDD = "SHIELDD"
 
 [default.extend-identifiers]
 cose = "cose"

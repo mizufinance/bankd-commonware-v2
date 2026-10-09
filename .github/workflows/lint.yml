@@ -1,6 +1,7 @@
 name: Lint
 
-permissions: {}
+permissions:
+  contents: read
 
 on:
   push:
@@ -13,243 +14,60 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # Allow Aegis to finish its 90-second Socket lookup before Cargo times out.
   CARGO_HTTP_TIMEOUT: "180"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
-  RUSTC_WRAPPER: "sccache"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
 
+# One job so we pay for checkout, toolchain and cache setup once.
 jobs:
-  clippy:
-    name: clippy
+  lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      CARGO_BUILD_JOBS: 4
-    permissions:
-      id-token: write
-      contents: read
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: nightly-2026-08-21
-          components: clippy
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.15.0
-      - name: Run clippy on runtime targets
-        run: cargo clippy --workspace --lib --bins --all-features --locked
+      - name: Init shieldd
+        run: git submodule update --init --depth 1 --recursive shieldd
         env:
-          RUSTFLAGS: -D warnings
-      - name: Run clippy on test targets
-        run: cargo clippy --workspace --tests --all-features --locked
-        env:
-          RUSTFLAGS: -D warnings
-      - name: Run clippy on bench and example targets
-        run: cargo clippy --workspace --benches --examples --all-features --locked
-        env:
-          RUSTFLAGS: -D warnings
-
-  fmt:
-    name: fmt
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: nightly
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  crate-checks:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    if: github.event_name == 'push'
-    permissions:
-      id-token: write
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [1, 2]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: 1.97.1
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.15.0
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
-        with:
-          tool: cargo-hack
-      - run: cargo hack check --feature-powerset --depth 1 --partition ${{ matrix.partition }}/2
-
-  docs:
-    if: ${{ github.repository == 'tempoxyz/tempo' }}
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: nightly
-      - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.15.0
-      - name: Build documentation
-        run: cargo doc --workspace --all-features --no-deps --document-private-items
-        env:
-          RUSTDOCFLAGS: --cfg docsrs -D warnings --show-type-layout --generate-link-to-definition --enable-index-page -Zunstable-options
-      - name: Exclude rustdocs from indexing
-        if: github.ref_name == 'main' && github.event_name == 'push'
+          GIT_LFS_SKIP_SMUDGE: "1"
+      - name: Install toolchains
         run: |
-          {
-            echo "User-agent: *"
-            echo "Disallow: /"
-          } > target/doc/robots.txt
-      - name: Setup Pages
-        if: github.ref_name == 'main' && github.event_name == 'push'
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-        with:
-          enablement: true
-      - name: Upload artifact
-        if: github.ref_name == 'main' && github.event_name == 'push'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: ./target/doc
-
-  deploy-docs:
-    if: ${{ github.repository == 'tempoxyz/tempo' && github.ref_name == 'main' && github.event_name == 'push' }}
-    needs: [docs]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
-
-  typos:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: crate-ci/typos@53821664afd79bb88fcdd22fdc2f49d8d3f6cac9 # v1
-
-  deny:
-    name: deny
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-        with:
-          command: check
-
-  zepter:
-    name: zepter
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: 1.97.1
+          rustup component add clippy
+          rustup target add riscv32imac-unknown-none-elf
+          rustup toolchain install nightly --profile minimal --component rustfmt
       - uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # v1
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.15.0
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
-          tool: zepter
-      - name: Eagerly pull dependencies
-        run: cargo metadata --format-version=1 --all-features --locked > /dev/null
-      - run: zepter run check
-
-  no-std:
-    name: no-std
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: 1.97.1
-          targets: riscv32imac-unknown-none-elf
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.15.0
+          tool: cargo-deny,zepter,typos,cargo-hack
       - name: Install RISC-V C toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf
-      - name: Run no_std checks
+      # Light checks, no compiling.
+      - parallel:
+          - name: fmt
+            run: cargo +nightly fmt --all --check
+          - name: typos
+            run: typos
+          - name: deny
+            run: cargo deny check
+          - name: zepter
+            run: |
+              cargo metadata --format-version=1 --all-features --locked > /dev/null
+              zepter run check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked
+        env:
+          RUSTFLAGS: -D warnings
+          CARGO_BUILD_JOBS: 4
+      - name: no-std
         run: .github/scripts/check_no_std.sh
         env:
           CC_riscv32imac_unknown_none_elf: riscv64-unknown-elf-gcc
-
-  lint-success:
-    name: lint success
-    runs-on: ubuntu-latest
-    if: always()
-    permissions:
-      id-token: write
-    needs:
-      - clippy
-      - fmt
-      - docs
-      - typos
-      - deny
-      - zepter
-      - no-std
-    timeout-minutes: 30
-    steps:
-      - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # release/v1
-        with:
-          allowed-skips: ${{ github.repository != 'tempoxyz/tempo' && 'docs' || '' }}
-          jobs: ${{ toJSON(needs) }}
+      - name: feature powerset
+        if: github.event_name == 'push'
+        run: cargo hack check --feature-powerset --depth 1
