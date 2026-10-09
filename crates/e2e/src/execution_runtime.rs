@@ -851,10 +851,34 @@ impl ExecutionNode {
 
     /// Shuts down the node and awaits until the node is terminated.
     pub async fn shutdown(self) {
+        let shield = self.node.evm_config.shield.clone();
         let _ = self.node.rpc_server_handle().clone().stop();
         self.runtime
             .graceful_shutdown_with_timeout(Duration::from_secs(10));
         let _ = self.exit_fut.await;
+        drop(self.node);
+        drop(self.gossip);
+
+        // Graceful shutdown signals regular tasks but does not await their cancellation.
+        // Keep the last Shieldd handle until those tasks release theirs, then close its
+        // database synchronously before a restart can open the same directory.
+        if let Some(shield) = shield {
+            self.runtime
+                .spawn_blocking(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while Arc::strong_count(&shield) > 1 {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "Shieldd handles still live after node shutdown: {}",
+                            Arc::strong_count(&shield)
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    drop(shield);
+                })
+                .await
+                .expect("Shieldd shutdown must complete before restart");
+        }
     }
 }
 

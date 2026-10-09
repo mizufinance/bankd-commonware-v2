@@ -558,7 +558,6 @@ fn build_fill_name(nonce_mode: &NonceMode, key_type: KeyType, parts: &[&str]) ->
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FeePayerContext {
     pub addr: Address,
-    pub token: Address,
     pub balance_before: U256,
 }
 

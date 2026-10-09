@@ -19,9 +19,10 @@ use tempo_contracts::precompiles::{
 use tempo_node::node::TempoNode;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-    TIP20_FACTORY_ADDRESS, tip_fee_manager::amm::compute_amount_out, tip20::ISSUER_ROLE,
+    TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE,
 };
-use tempo_primitives::{TempoTxEnvelope, transaction::calc_gas_balance_spending};
+use tempo_primitives::TempoTxEnvelope;
+use tempo_revm::handler::FEE_ESCROW_ADDRESS;
 
 /// Helper to setup a test token by manually injecting transactions and advancing blocks
 async fn setup_token_manual<P>(
@@ -594,10 +595,9 @@ async fn test_block_building_more_txs_than_fit() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verifies that the payload builder's fee score accounts for the AMM haircut
-/// when a transaction pays in a token different from the validator's preferred token.
+/// Bankd scores the native BRL credited to escrow, regardless of TIP-20 fee preferences.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_payload_fees_account_for_amm_haircut() -> eyre::Result<()> {
+async fn test_payload_fees_use_native_brl_despite_amm_preferences() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut setup = crate::utils::TestNodeBuilder::new()
@@ -692,13 +692,14 @@ async fn test_payload_fees_account_for_amm_haircut() -> eyre::Result<()> {
     nonce += 1;
     setup.node.advance_block().await?;
 
-    // Record collected fees before the attack block
+    // Record both fee destinations before the block.
+    let escrow_before = user_provider.get_balance(FEE_ESCROW_ADDRESS).await?;
     let collected_before = fee_manager
         .collectedFees(fee_beneficiary, PATH_USD_ADDRESS)
         .call()
         .await?;
 
-    // Submit a transaction that pays fees in user_fee_token and settles through the two-hop route.
+    // The token preference and two-hop route must not change native gas accounting.
     let attack_tx_hash = sign_and_inject(
         &mut setup.node,
         &user_signer,
@@ -718,36 +719,25 @@ async fn test_payload_fees_account_for_amm_haircut() -> eyre::Result<()> {
         .get_transaction_receipt(attack_tx_hash)
         .await?
         .expect("attack tx receipt must exist");
-    let nominal_spending = calc_gas_balance_spending(
-        attack_receipt.gas_used,
-        attack_receipt.effective_gas_price(),
-    );
-    let one_hop_post_swap = compute_amount_out(nominal_spending)?;
-    let expected_post_swap = compute_amount_out(one_hop_post_swap)?;
+    let native_spending =
+        U256::from(attack_receipt.gas_used) * U256::from(attack_receipt.effective_gas_price());
+    assert!(native_spending > U256::ZERO);
 
-    // Verify collected fees reflect the haircut
+    // No TIP-20 fees accrue; all native gas fees are credited to Bankd's escrow.
     let collected_after = fee_manager
         .collectedFees(fee_beneficiary, PATH_USD_ADDRESS)
         .call()
         .await?;
     let collected_delta = collected_after - collected_before;
 
-    assert!(
-        collected_delta < one_hop_post_swap,
-        "two-hop validator accrual ({collected_delta}) should be less than one-hop accrual ({one_hop_post_swap})"
-    );
-    // The payload fee score must not exceed the actual validator revenue
-    assert!(
-        payload_fees <= nominal_spending,
-        "payload fees ({payload_fees}) should not exceed nominal spending ({nominal_spending})"
+    assert_eq!(collected_delta, U256::ZERO);
+    assert_eq!(
+        payload_fees, native_spending,
+        "payload fee score should match native BRL gas spending"
     );
     assert_eq!(
-        collected_delta, expected_post_swap,
-        "validator accrual should reflect AMM haircut"
-    );
-    assert_eq!(
-        payload_fees, collected_delta,
-        "payload fee score should match actual validator revenue"
+        user_provider.get_balance(FEE_ESCROW_ADDRESS).await?,
+        escrow_before + native_spending
     );
 
     Ok(())

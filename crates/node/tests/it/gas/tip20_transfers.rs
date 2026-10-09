@@ -242,6 +242,9 @@ impl<P: Provider + Clone> TransferGasEnv<P> {
     }
 
     async fn prepare_reward_delta_hook(&mut self) -> eyre::Result<()> {
+        self.admin
+            .fund_native([self.reward_sender.address()])
+            .await?;
         TempoCalls::new()
             .push(
                 self.token_addr,
@@ -400,6 +403,9 @@ impl<P: Provider + Clone> TransferGasEnv<P> {
         if let Some(recipient) = &recipient {
             funded_accounts.push((recipient.address(), U256::from(MINT_AMOUNT)));
         }
+        self.admin
+            .fund_native(funded_accounts.iter().map(|(to, _)| *to))
+            .await?;
         let token_addr = self.token_addr;
         TempoCalls::new()
             .extend(funded_accounts.iter().copied(), |(to, amount)| {

@@ -161,7 +161,10 @@ pub struct TempoPayloadBuilderConfig {
     pub enable_prewarming: bool,
     /// Whether payload builds should skip state-root computation.
     pub skip_state_root: bool,
-    /// Whether to enable speculative parallel payload-builder planning.
+    /// Requests speculative parallel payload-builder planning.
+    ///
+    /// Currently disabled: storage-action replay does not represent Bankd's native
+    /// balance changes or Compliance reads. Builds use normal EVM execution instead.
     pub enable_parallel: bool,
     /// Initial estimate of total replayable build work divided by work at tx cutoff.
     ///
@@ -196,8 +199,14 @@ impl<Provider> TempoPayloadBuilder<Provider> {
         provider: Provider,
         executor: TaskExecutor,
         evm_config: TempoEvmConfig,
-        config: TempoPayloadBuilderConfig,
+        mut config: TempoPayloadBuilderConfig,
     ) -> Self {
+        if config.enable_parallel {
+            warn!(
+                "Parallel block building is disabled until replay supports native BRL and Compliance"
+            );
+            config.enable_parallel = false;
+        }
         Self {
             pool,
             provider,

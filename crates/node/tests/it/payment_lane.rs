@@ -58,11 +58,11 @@ async fn test_payment_lane_with_mixed_load() -> eyre::Result<()> {
         .wallet(wallet2)
         .connect_http(http_url.clone());
 
-    // Ensure the native account balance is 0
+    // Both senders need native BRL for Bankd gas.
     let balance1 = provider.get_account_info(caller).await?.balance;
-    let balance2 = provider.get_account_info(caller).await?.balance;
-    assert_eq!(balance1, U256::ZERO);
-    assert_eq!(balance2, U256::ZERO);
+    let balance2 = provider.get_account_info(caller2).await?.balance;
+    assert!(balance1 > U256::ZERO);
+    assert!(balance2 > U256::ZERO);
 
     // Get fee tokens for both accounts
     let fee_manager = IFeeManager::new(TIP_FEE_MANAGER_ADDRESS, provider.clone());
@@ -644,6 +644,16 @@ async fn test_payment_lane_gas_limits_channel_reserve() -> eyre::Result<()> {
     let payer_provider = ProviderBuilder::new()
         .wallet(payer.clone())
         .connect_http(url.clone());
+
+    funder_provider
+        .send_transaction(
+            TransactionRequest::default()
+                .to(payer.address())
+                .value(U256::from(100_000_000_000_000_000_000u128)),
+        )
+        .await?
+        .get_receipt()
+        .await?;
 
     // Fund payer. Reserve open/topUp use native system movement and must not require allowance.
     let token = ITIP20::new(PATH_USD_ADDRESS, funder_provider.clone());

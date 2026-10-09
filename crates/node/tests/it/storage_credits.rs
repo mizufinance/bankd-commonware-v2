@@ -100,6 +100,7 @@ async fn send_tempo_tx<P: Provider>(
 /// - let post-execution reimbursement restore the unused limit,
 /// - assert the keychain did not retain a storage credit from fee bookkeeping.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: native gas refunds do not restore TIP-20 fee-token spending-limit slots"]
 async fn test_tip1060_keychain_fee_refund_does_not_retain_storage_credit() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -222,6 +223,7 @@ async fn test_tip1060_keychain_fee_refund_does_not_retain_storage_credit() -> ey
 /// with TIP-1060 disabled; a later public `rebalanceSwap` must not clear that same slot under
 /// normal accounting and leave a stale credit.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: native gas does not accumulate TIP-20 FeeManager custody balances"]
 async fn test_tip1060_rebalance_swap_does_not_mint_stale_fee_manager_custody_credit()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -450,6 +452,7 @@ async fn test_tip1060_rebalance_swap_does_not_mint_stale_fee_manager_custody_cre
 /// FeeManager distribution must not mint a reusable FeeManager credit for the collected-fee clear,
 /// and its nested TIP-20 payout must still account for creating the validator's token balance.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: native gas does not accrue TIP-20 validator fees for distribution"]
 async fn test_tip1060_fee_manager_credit_from_distribute_fees_is_not_redeemable() -> eyre::Result<()>
 {
     reth_tracing::init_test_tracing();
@@ -720,6 +723,7 @@ async fn test_tip1060_fee_manager_credit_from_distribute_fees_is_not_redeemable(
 /// ReceivePolicyGuard.balances[receipt]. Those creations must be accounted even though
 /// distributeFees disables storage-credit minting for FeeManager-owned clears.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: native gas does not accrue TIP-20 validator fees for distribution"]
 async fn test_tip1060_distribute_fees_receive_policy_guard_creations_are_accounted()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1188,6 +1192,7 @@ async fn test_tip1060_successful_keychain_spend_fee_refund_cancels_restored_limi
 /// Successful fee-token refunds must cancel a TIP-1060 credit minted by a same-tx user spend if
 /// post-tx reimbursement recreates the fee payer's TIP-20 balance slot.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: native gas refunds do not restore TIP-20 balance slots"]
 async fn test_tip1060_successful_fee_token_spend_fee_refund_cancels_restored_balance_credit()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

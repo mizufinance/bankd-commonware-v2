@@ -274,11 +274,11 @@ for (const problem of ['', 'invalid JSON', 'wrong tags', 'symlink', 'oversized']
 }
 
 test('status workflow handles acknowledgements and lifecycle events under the same lock', () => {
-  const workflow = fs.readFileSync(path.join(__dirname, '../workflows/docker-pr-status.yml'), 'utf8');
+  const workflow = fs.readFileSync(path.join(__dirname, '../disabled-workflows/docker-pr-status.yml'), 'utf8');
   assert.match(workflow, /types: \[requested, in_progress, completed\]/);
   assert.ok(workflow.includes('group: docker-pr-status-${{ inputs.run_id || github.event.workflow_run.id }}'));
   assert.ok(workflow.includes('workflow_call:'));
-  const dispatcher = fs.readFileSync(path.join(__dirname, '../workflows/docker-pr.yml'), 'utf8');
+  const dispatcher = fs.readFileSync(path.join(__dirname, '../disabled-workflows/docker-pr.yml'), 'utf8');
   assert.ok(dispatcher.includes('uses: ./.github/workflows/docker-pr-status.yml'));
   assert.ok(dispatcher.includes('run_id: ${{ needs.dispatch.outputs.run-id }}'));
   assert.match(workflow, /cancel-in-progress: false/);
@@ -286,7 +286,7 @@ test('status workflow handles acknowledgements and lifecycle events under the sa
   assert.ok(workflow.includes('path: ${{ runner.temp }}/docker-pr-report'));
   assert.match(workflow, /pull-requests: write/);
   for (const name of ['docker.yml', 'docker-profiling.yml']) {
-    const build = fs.readFileSync(path.join(__dirname, '../workflows', name), 'utf8');
+    const build = fs.readFileSync(path.join(__dirname, '../disabled-workflows', name), 'utf8');
     assert.ok(!build.includes('pull-requests: write'));
     assert.ok(!build.includes('issues: write'));
     assert.ok(build.includes('name: docker-pr-images-${{ github.run_attempt }}'));
@@ -321,7 +321,7 @@ test('direct acknowledgement rejects invalid IDs and retains run provenance chec
 for (const mode of ['', 'nightly', 'profiling']) {
   test(`actual ${mode || 'normal'} collector script records build output as JSON`, async () => {
     const file = mode === 'profiling' ? 'docker-profiling.yml' : 'docker.yml';
-    const yaml = fs.readFileSync(path.join(__dirname, '../workflows', file), 'utf8');
+    const yaml = fs.readFileSync(path.join(__dirname, '../disabled-workflows', file), 'utf8');
     const step = yaml.split('      - name: Record published PR images\n')[1].split('\n      - name: ')[0];
     assert.match(step, /if: inputs.pr_number != ''/);
     assert.ok(!step.includes('always()'));

@@ -78,6 +78,15 @@ fn many_bad_links() {
 // this test.
 #[test_traced]
 fn reach_height_20_with_a_few_bad_links() {
+    run_with_a_few_bad_links(4);
+}
+
+#[test_traced]
+fn ten_validators_reach_height_20_with_a_few_bad_links() {
+    run_with_a_few_bad_links(10);
+}
+
+fn run_with_a_few_bad_links(signers: u32) {
     let _ = tempo_eyre::install();
 
     let link = Link {
@@ -87,7 +96,7 @@ fn reach_height_20_with_a_few_bad_links() {
     };
 
     let setup = Setup::new()
-        .how_many_signers(10)
+        .how_many_signers(signers)
         .epoch_length(100)
         .linkage(link);
 

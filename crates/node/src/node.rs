@@ -35,7 +35,7 @@ use reth_rpc_eth_api::{
     helpers::config::{EthConfigApiServer, EthConfigHandler},
 };
 use reth_storage_api::{AccountInfoReader, EmptyBodyStorage};
-use reth_tracing::tracing::{debug, info, warn};
+use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{
     Pool, PoolPooledTx, PoolTransaction, StatefulValidationFn, StatelessValidationFn,
     TransactionOrigin, TransactionPool, TransactionValidationTaskExecutor,
@@ -101,7 +101,7 @@ pub struct TempoNodeArgs {
     #[arg(long = "builder.enable-prewarming", default_value_t = true)]
     pub builder_enable_prewarming: bool,
 
-    /// Enable speculative parallel payload builder.
+    /// Legacy parallel builder request (disabled until native BRL replay is supported).
     #[arg(long = "builder.parallel", default_value_t = false, hide = true)]
     pub builder_parallel: bool,
 
@@ -155,10 +155,6 @@ impl TempoNodeArgs {
 
     /// Returns a [`TempoPayloadBuilderBuilder`] configured from these args.
     pub fn payload_builder_builder(&self) -> TempoPayloadBuilderBuilder {
-        if self.builder_parallel {
-            warn!("Parallel block builder is still in development and should not be used");
-        }
-
         TempoPayloadBuilderBuilder {
             state_provider_metrics: self.builder_state_provider_metrics,
             enable_prewarming: !self.builder_disable_prewarming,
@@ -782,7 +778,7 @@ where
         let shield_checker = evm_config
             .shield
             .clone()
-            .map(crate::shield::PoolChecker::new);
+            .map(crate::shield::PoolChecker::shared);
         let validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)

@@ -171,8 +171,7 @@ mod tests {
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
     };
-    use alloy::primitives::U256;
-    use alloy::sol_types::SolCall;
+    use alloy::{primitives::U256, sol_types::SolCall};
 
     fn setup(owner: Address) -> HashMapStorageProvider {
         let mut storage = HashMapStorageProvider::new(1);

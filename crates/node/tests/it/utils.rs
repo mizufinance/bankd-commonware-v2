@@ -459,6 +459,7 @@ pub(crate) struct TestNodeBuilder {
     custom_validator: Option<Address>,
     dynamic_validator: Option<Arc<std::sync::Mutex<Address>>>,
     schedule: ForkSchedule,
+    request_parallel_builder: bool,
 }
 
 impl TestNodeBuilder {
@@ -474,12 +475,19 @@ impl TestNodeBuilder {
             custom_validator: None,
             dynamic_validator: None,
             schedule: ForkSchedule::Devnet,
+            request_parallel_builder: false,
         }
     }
 
     /// Set the fork schedule (Devnet, Testnet, or Mainnet)
     pub(crate) fn with_schedule(mut self, schedule: ForkSchedule) -> Self {
         self.schedule = schedule;
+        self
+    }
+
+    /// Request the legacy parallel builder when launching an HTTP test node.
+    pub(crate) fn with_parallel_builder(mut self, enabled: bool) -> Self {
+        self.request_parallel_builder = enabled;
         self
     }
 
@@ -617,7 +625,12 @@ impl TestNodeBuilder {
 
         let node_handle = NodeBuilder::new(node_config.clone())
             .testing_node(runtime.clone())
-            .node(TempoNode::default())
+            .node(
+                TempoNode::default().map_payload_builder_builder(|mut builder| {
+                    builder.enable_parallel = self.request_parallel_builder;
+                    builder
+                }),
+            )
             .launch_with_debug_capabilities()
             .map_debug_payload_attributes(move |mut attributes| {
                 let validator = dynamic_validator

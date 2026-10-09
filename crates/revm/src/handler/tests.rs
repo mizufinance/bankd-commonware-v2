@@ -24,11 +24,13 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, storage::ContractStorage, test_util::TIP20Setup,
     tip_fee_manager::TipFeeManager,
 };
-use tempo_primitives::TempoAddressExt;
-use tempo_primitives::transaction::{
-    Call, PrimitiveSignature, RecoveredTempoAuthorization, TempoSignature,
-    TempoSignedAuthorization, calc_gas_balance_spending,
-    tt_signature::{P256SignatureWithPreHash, WebAuthnSignature},
+use tempo_primitives::{
+    TempoAddressExt,
+    transaction::{
+        Call, PrimitiveSignature, RecoveredTempoAuthorization, TempoSignature,
+        TempoSignedAuthorization, calc_gas_balance_spending,
+        tt_signature::{P256SignatureWithPreHash, WebAuthnSignature},
+    },
 };
 
 fn create_test_journal() -> Journal<CacheDB<EmptyDB>> {
@@ -808,7 +810,7 @@ fn test_aa_gas_value_transfer() {
     );
 
     // bankd: native BRL value is allowed in AA calls and pays the usual value transfer cost.
-    let mut zero_value_env = aa_env.clone();
+    let mut zero_value_env = aa_env;
     zero_value_env.aa_calls[0].value = U256::ZERO;
     let zero_value = calculate_aa_batch_intrinsic_gas(
         &zero_value_env,

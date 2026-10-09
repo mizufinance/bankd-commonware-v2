@@ -130,7 +130,7 @@ fn shielded_tx_pays_out_of_escrow_or_reverts() {
     let mut db = state_with_escrow(100, B256::ZERO);
     let mut executor = TestExecutorBuilder::default()
         .with_parent_beacon_block_root(B256::ZERO)
-        .with_shield(Arc::new(engine.clone()) as ShieldHandle)
+        .with_shield(Arc::new(engine) as ShieldHandle)
         .build(&mut db, &chainspec);
     executor.apply_pre_execution_changes().unwrap();
 

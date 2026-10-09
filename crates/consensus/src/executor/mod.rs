@@ -194,12 +194,15 @@ impl ExecutionLayer for Arc<TempoFullNode> {
             let Some(shield) = node.evm_config.shield.clone() else {
                 return Ok(());
             };
-            // Shieldd commits block on its own runtime, keep that off the async workers.
-            tokio::task::spawn_blocking(move || {
-                tempo_node::shield::finalize_block(&node.provider, &shield, block_hash, height)
-            })
-            .await
-            .wrap_err("shieldd finalize task panicked")?
+            // Consensus can run outside Tokio (for example under Commonware's deterministic
+            // runtime), so schedule blocking work through the execution node's runtime.
+            let executor = node.task_executor.clone();
+            executor
+                .spawn_blocking(move || {
+                    tempo_node::shield::finalize_block(&node.provider, &shield, block_hash, height)
+                })
+                .await
+                .wrap_err("shieldd finalize task panicked")?
         }
     }
 

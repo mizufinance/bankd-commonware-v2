@@ -191,7 +191,7 @@ pub(crate) fn rand_sub_amount(max: U256) -> U256 {
     max / U256::from(4)
 }
 
-/// Helper function to fund an address with tokens
+/// Fund an address with TIP-20 tokens and native BRL for gas.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn fund_address_with(
     setup: &mut SingleNodeSetup,
@@ -214,11 +214,18 @@ pub(super) async fn fund_address_with(
         max_priority_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
         max_fee_per_gas: TEMPO_T1_BASE_FEE as u128,
         gas_limit: 2_000_000,
-        calls: vec![Call {
-            to: fee_token.into(),
-            value: U256::ZERO,
-            input: transfer_calldata.into(),
-        }],
+        calls: vec![
+            Call {
+                to: fee_token.into(),
+                value: U256::ZERO,
+                input: transfer_calldata.into(),
+            },
+            Call {
+                to: recipient.into(),
+                value: U256::from(100_000_000_000_000_000_000u128),
+                input: Bytes::new(),
+            },
+        ],
         nonce_key: U256::ZERO,
         nonce: provider.get_transaction_count(funder_addr).await?,
         fee_token: Some(fee_token),
@@ -755,11 +762,23 @@ pub(crate) fn create_default_token_limit(
 ) -> Vec<tempo_primitives::transaction::TokenLimit> {
     use tempo_primitives::transaction::TokenLimit;
 
-    vec![TokenLimit {
-        token: DEFAULT_FEE_TOKEN,
-        limit: funded / U256::from(2),
+    vec![
+        TokenLimit {
+            token: DEFAULT_FEE_TOKEN,
+            limit: funded / U256::from(2),
+            period: 0,
+        },
+        native_gas_limit(),
+    ]
+}
+
+/// Permit one native BRL of gas independently of the TIP-20 transfer allowance.
+pub(crate) fn native_gas_limit() -> TokenLimit {
+    TokenLimit {
+        token: tempo_revm::handler::NATIVE_FEE_TOKEN,
+        limit: U256::from(1_000_000_000_000_000_000u64),
         period: 0,
-    }]
+    }
 }
 
 // ===== Transaction Creation Helper Functions =====
@@ -905,16 +924,11 @@ pub(crate) async fn configure_fee_payer_context(
     }
 
     let fee_payer_addr = fee_payer_signer.address();
-    let token = tx.fee_token.unwrap_or(DEFAULT_FEE_TOKEN);
-    let balance_before = ITIP20::new(token, provider)
-        .balanceOf(fee_payer_addr)
-        .call()
-        .await?;
+    let balance_before = provider.get_balance(fee_payer_addr).await?;
     sign_fee_payer(tx, signer_addr, fee_payer_signer)?;
 
     Ok(Some(FeePayerContext {
         addr: fee_payer_addr,
-        token,
         balance_before,
     }))
 }
@@ -975,19 +989,14 @@ pub(crate) async fn assert_fee_payer_spent(
     fee_payer: FeePayerContext,
     receipt: &serde_json::Value,
 ) -> eyre::Result<()> {
-    use tempo_primitives::transaction::calc_gas_balance_spending;
-
     let gas_used = parse_hex_u64(receipt, "gasUsed")?
         .ok_or_else(|| eyre::eyre!("Receipt missing 'gasUsed'"))?;
     let effective_gas_price = parse_hex_u128(receipt, "effectiveGasPrice")?
         .ok_or_else(|| eyre::eyre!("Receipt missing 'effectiveGasPrice'"))?;
 
-    let expected_cost = calc_gas_balance_spending(gas_used, effective_gas_price);
+    let expected_cost = U256::from(gas_used) * U256::from(effective_gas_price);
 
-    let balance_after = ITIP20::new(fee_payer.token, provider)
-        .balanceOf(fee_payer.addr)
-        .call()
-        .await?;
+    let balance_after = provider.get_balance(fee_payer.addr).await?;
     let actual_spent = fee_payer
         .balance_before
         .checked_sub(balance_after)
@@ -1001,7 +1010,7 @@ pub(crate) async fn assert_fee_payer_spent(
 
     assert_eq!(
         actual_spent, expected_cost,
-        "Fee payer balance change should equal ceil(gasUsed * effectiveGasPrice / 10^12) \
+        "Native fee payer balance change should equal gasUsed * effectiveGasPrice \
          (balance_before={}, balance_after={}, gasUsed={gas_used}, effectiveGasPrice={effective_gas_price})",
         fee_payer.balance_before, balance_after,
     );

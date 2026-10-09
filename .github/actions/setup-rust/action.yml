@@ -1,0 +1,62 @@
+name: Set up Rust for Bankd
+description: Install the repository toolchain and build dependencies on GitHub-hosted Linux runners.
+
+inputs:
+  toolchain:
+    description: Override rust-toolchain.toml when checking formatting or the minimum Rust version.
+    default: ""
+  components:
+    description: Additional Rust components.
+    default: ""
+  target:
+    description: Additional Rust target.
+    default: ""
+  build:
+    description: Install native build dependencies and restore the Cargo cache.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Read toolchain
+      id: toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+      run: |
+        if [[ -z "$TOOLCHAIN" ]]; then
+          TOOLCHAIN=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
+        fi
+        echo "version=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+    - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      with:
+        toolchain: ${{ steps.toolchain.outputs.version }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.target }}
+    - name: Select the installed toolchain for this checkout
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ steps.toolchain.outputs.version }}
+      # A default toolchain alone does not override rust-toolchain.toml.
+      run: rustup override set "$TOOLCHAIN"
+    - name: Install native build dependencies
+      if: inputs.build == 'true'
+      shell: bash
+      run: |
+        # The Azure mirror stalled for thirty minutes, even with per-request timeouts.
+        for source in /etc/apt/apt-mirrors.txt /etc/apt/sources.list \
+          /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+          if [[ -f "$source" ]]; then
+            sudo sed -i -E 's@https?://azure[.]archive[.]ubuntu[.]com/ubuntu@https://archive.ubuntu.com/ubuntu@g' "$source"
+          fi
+        done
+        apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        sudo timeout --kill-after=10s 5m apt-get "${apt_options[@]}" update
+        sudo timeout --kill-after=10s 10m apt-get "${apt_options[@]}" install -y clang libclang-dev libudev-dev protobuf-compiler mold
+        sudo ln -sf /usr/bin/mold "$(realpath /usr/bin/ld)"
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: inputs.build == 'true'
+      with:
+        key: ${{ github.job }}
+        # PRs can restore main's cache without filling the repository quota.
+        save-if: ${{ github.ref == 'refs/heads/main' }}

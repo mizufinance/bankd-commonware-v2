@@ -2,7 +2,6 @@ use alloy::{
     primitives::{Address, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::{MnemonicBuilder, PrivateKeySigner},
-    sol_types::SolEvent,
 };
 use alloy_network::{ReceiptResponse, TransactionBuilder};
 use alloy_primitives::Bytes;
@@ -11,12 +10,12 @@ use std::env;
 use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_contracts::precompiles::{IFeeManager, ITIP20};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS};
-use tempo_primitives::transaction::calc_gas_balance_spending;
+use tempo_revm::handler::FEE_ESCROW_ADDRESS;
 
 use crate::utils::TestNodeBuilder;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_fee_in_stable() -> eyre::Result<()> {
+async fn test_fee_in_native_brl() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let source = if let Ok(rpc_url) = env::var("RPC_URL") {
@@ -30,9 +29,10 @@ async fn test_fee_in_stable() -> eyre::Result<()> {
     let caller = wallet.address();
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(http_url);
 
-    // Ensure the native account balance is 0
+    // Bankd's genesis funds native BRL for gas.
     let balance = provider.get_account_info(caller).await?.balance;
-    assert_eq!(balance, U256::ZERO);
+    assert!(balance > U256::ZERO);
+    let escrow_before = provider.get_balance(FEE_ESCROW_ADDRESS).await?;
 
     let fee_manager = IFeeManager::new(TIP_FEE_MANAGER_ADDRESS, provider.clone());
     let fee_token_address = fee_manager.userTokens(caller).call().await?;
@@ -49,28 +49,35 @@ async fn test_fee_in_stable() -> eyre::Result<()> {
         .raw_request::<_, TempoTransactionReceipt>("eth_getTransactionReceipt".into(), (tx_hash,))
         .await?;
 
-    // Assert that the fee token balance has decreased by gas spent
+    // The configured TIP-20 fee token is untouched; gas goes to the native fee escrow.
     let balance_after = fee_token.balanceOf(caller).call().await?;
 
-    let cost = calc_gas_balance_spending(receipt.gas_used, receipt.effective_gas_price());
-    assert_eq!(balance_after, initial_balance - U256::from(cost));
+    let cost = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price());
+    assert!(cost > U256::ZERO);
+    assert_eq!(balance_after, initial_balance);
+    assert_eq!(provider.get_balance(caller).await?, balance - cost);
+    assert_eq!(
+        provider.get_balance(FEE_ESCROW_ADDRESS).await?,
+        escrow_before + cost
+    );
 
     assert!(receipt.status());
-    assert_eq!(receipt.logs().len(), 1);
-    let transfer = ITIP20::Transfer::decode_log(&receipt.logs()[0].inner)?;
-    assert_eq!(transfer.from, caller);
-    assert_eq!(transfer.to, TIP_FEE_MANAGER_ADDRESS);
-    assert_eq!(transfer.amount, U256::from(cost));
-    assert_eq!(receipt.fee_token, Some(fee_token_address));
+    assert!(receipt.logs().is_empty());
+    assert_eq!(receipt.fee_token, None);
 
     Ok(())
 }
 
+#[test_case::test_case(false ; "default_builder")]
+#[test_case::test_case(true ; "legacy_parallel_request")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_default_fee_token() -> eyre::Result<()> {
+async fn test_native_fee_without_token_preference(parallel: bool) -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let setup = TestNodeBuilder::new().build_http_only().await?;
+    let setup = TestNodeBuilder::new()
+        .with_parallel_builder(parallel)
+        .build_http_only()
+        .await?;
     let http_url = setup.http_url;
 
     let wallet = MnemonicBuilder::from_phrase(crate::utils::TEST_MNEMONIC).build()?;
@@ -93,14 +100,26 @@ async fn test_default_fee_token() -> eyre::Result<()> {
         .get_receipt()
         .await?;
 
+    // TIP-20 tokens cannot fund Bankd gas; give the new account native BRL too.
+    let native_funding = U256::from(1_000_000_000_000_000_000u64);
+    provider
+        .send_transaction(
+            TransactionRequest::default()
+                .to(new_address)
+                .value(native_funding),
+        )
+        .await?
+        .get_receipt()
+        .await?;
+
     // Create provider with the new wallet
     let new_provider = ProviderBuilder::new()
         .wallet(new_wallet)
         .connect_http(http_url);
 
-    // Ensure the native account balance is 0
+    // Native gas works without setting a TIP-20 fee-token preference.
     let balance = new_provider.get_account_info(new_address).await?.balance;
-    assert_eq!(balance, U256::ZERO);
+    assert_eq!(balance, native_funding);
 
     // Ensure the fee token is not set for the user
     let fee_manager = IFeeManager::new(TIP_FEE_MANAGER_ADDRESS, provider.clone());
@@ -117,24 +136,22 @@ async fn test_default_fee_token() -> eyre::Result<()> {
         .raw_request::<_, TempoTransactionReceipt>("eth_getTransactionReceipt".into(), (tx_hash,))
         .await?;
 
-    // Assert that the fee token balance has decreased by gas spent
+    // Gas is deducted only from the native balance.
     let balance_after = path_usd.balanceOf(new_address).call().await?;
-    let cost = calc_gas_balance_spending(receipt.gas_used, receipt.effective_gas_price());
-    assert_eq!(balance_after, initial_balance - U256::from(cost));
+    let cost = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price());
+    assert!(cost > U256::ZERO);
+    assert_eq!(balance_after, initial_balance);
+    assert_eq!(new_provider.get_balance(new_address).await?, balance - cost);
 
     assert!(receipt.status());
-    assert_eq!(receipt.logs().len(), 1);
-    let transfer = ITIP20::Transfer::decode_log(&receipt.logs()[0].inner)?;
-    assert_eq!(transfer.from, new_address);
-    assert_eq!(transfer.to, TIP_FEE_MANAGER_ADDRESS);
-    assert_eq!(transfer.amount, U256::from(cost));
-    assert_eq!(receipt.fee_token, Some(PATH_USD_ADDRESS));
+    assert!(receipt.logs().is_empty());
+    assert_eq!(receipt.fee_token, None);
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_fee_transfer_logs() -> eyre::Result<()> {
+async fn test_failed_transaction_charges_native_brl() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let source = if let Ok(rpc_url) = env::var("RPC_URL") {
@@ -148,9 +165,10 @@ async fn test_fee_transfer_logs() -> eyre::Result<()> {
     let caller = wallet.address();
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(http_url);
 
-    // Ensure the native account balance is 0
+    // Failed execution still pays gas in native BRL.
     let balance = provider.get_account_info(caller).await?.balance;
-    assert_eq!(balance, U256::ZERO);
+    assert!(balance > U256::ZERO);
+    let escrow_before = provider.get_balance(FEE_ESCROW_ADDRESS).await?;
 
     let fee_manager = IFeeManager::new(TIP_FEE_MANAGER_ADDRESS, provider.clone());
     let fee_token_address = fee_manager.userTokens(caller).call().await?;
@@ -169,19 +187,21 @@ async fn test_fee_transfer_logs() -> eyre::Result<()> {
         .raw_request::<_, TempoTransactionReceipt>("eth_getTransactionReceipt".into(), (tx_hash,))
         .await?;
 
-    // Assert that the fee token balance has decreased by gas spent
+    // A failed create charges native gas without emitting a TIP-20 fee transfer.
     let balance_after = fee_token.balanceOf(caller).call().await?;
 
-    let cost = calc_gas_balance_spending(receipt.gas_used, receipt.effective_gas_price());
-    assert_eq!(balance_after, initial_balance - U256::from(cost));
+    let cost = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price());
+    assert!(cost > U256::ZERO);
+    assert_eq!(balance_after, initial_balance);
+    assert_eq!(provider.get_balance(caller).await?, balance - cost);
+    assert_eq!(
+        provider.get_balance(FEE_ESCROW_ADDRESS).await?,
+        escrow_before + cost
+    );
 
     assert!(!receipt.status());
-    assert_eq!(receipt.logs().len(), 1);
-    let transfer = ITIP20::Transfer::decode_log(&receipt.logs()[0].inner)?;
-    assert_eq!(transfer.from, caller);
-    assert_eq!(transfer.to, TIP_FEE_MANAGER_ADDRESS);
-    assert_eq!(transfer.amount, U256::from(cost));
-    assert_eq!(receipt.fee_token, Some(fee_token_address));
+    assert!(receipt.logs().is_empty());
+    assert_eq!(receipt.fee_token, None);
 
     Ok(())
 }

@@ -114,8 +114,8 @@ pub(super) async fn run_raw_send_matrix<E: TestEnv>(env: &mut E) -> eyre::Result
                 limits: SpendingLimits::Custom(spending_limit),
                 expiry: KeyExpiry::None,
             })
-            .test_action(TestAction::Transfer(spending_limit))
-            .expected(ExpectedOutcome::Revert),
+            // Native gas has its own allowance, so the full TIP-20 limit is available.
+            .test_action(TestAction::Transfer(spending_limit)),
         RawSendTestCase::new(KeyType::P256)
             .key_setup(KeySetup::AccessKey {
                 limits: SpendingLimits::Custom(spending_limit),
@@ -986,11 +986,14 @@ pub(crate) async fn run_raw_case<E: TestEnv>(
                 SpendingLimits::Default => Some(create_default_token_limit(funded)),
                 SpendingLimits::Unlimited => None,
                 SpendingLimits::Empty => Some(vec![]),
-                SpendingLimits::Custom(amount) => Some(vec![TokenLimit {
-                    token: DEFAULT_FEE_TOKEN,
-                    limit: *amount,
-                    period: 0,
-                }]),
+                SpendingLimits::Custom(amount) => Some(vec![
+                    TokenLimit {
+                        token: DEFAULT_FEE_TOKEN,
+                        limit: *amount,
+                        period: 0,
+                    },
+                    native_gas_limit(),
+                ]),
             };
 
             return run_raw_access_key_case(
@@ -1928,11 +1931,7 @@ pub(super) async fn run_fee_payer_cosign_scenario<E: TestEnv>(env: &mut E) -> ey
     let user_signer = PrivateKeySigner::random();
     let user_addr = user_signer.address();
 
-    let fee_payer_balance_before =
-        tempo_precompiles::tip20::ITIP20::new(DEFAULT_FEE_TOKEN, env.provider())
-            .balanceOf(fee_payer_addr)
-            .call()
-            .await?;
+    let fee_payer_balance_before = env.provider().get_balance(fee_payer_addr).await?;
 
     let mut tx = create_basic_aa_tx(
         chain_id,
@@ -1978,7 +1977,6 @@ pub(super) async fn run_fee_payer_cosign_scenario<E: TestEnv>(env: &mut E) -> ey
 
     let fee_payer_ctx = FeePayerContext {
         addr: fee_payer_addr,
-        token: DEFAULT_FEE_TOKEN,
         balance_before: fee_payer_balance_before,
     };
     assert_fee_payer_spent(env.provider(), fee_payer_ctx, &receipt).await?;

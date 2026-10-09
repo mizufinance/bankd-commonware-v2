@@ -4,6 +4,14 @@
 [advisories]
 yanked = "warn"
 ignore = [
+  # Shieldd's Arkworks 0.5 and genawaiter dependencies still use these
+  # unmaintained procedural macros; neither has a compatible maintained release.
+  "RUSTSEC-2024-0388", # derivative 2.2.0
+  "RUSTSEC-2024-0370", # proc-macro-error 0.4.12
+  # Arkworks 0.5 uses tracing-subscriber 0.2 without any features. Its vulnerable
+  # fmt module is disabled; check-advisory-features.py enforces this in CI.
+  # The application's formatting subscriber is the patched 0.3.23 release.
+  "RUSTSEC-2025-0055",
   # https://rustsec.org/advisories/RUSTSEC-2024-0436 paste! is unmaintained
   "RUSTSEC-2024-0436",
   # https://rustsec.org/advisories/RUSTSEC-2025-0141 bincode is unmaintained
@@ -104,6 +112,10 @@ unknown-registry = "warn"
 # in the allow list is encountered
 unknown-git = "deny"
 allow-git = [
+  # Shieldd crypto forks already pinned by the workspace Cargo.lock.
+  "https://github.com/mizufinance/decaf377",
+  "https://github.com/mizufinance/decaf377-rdsa",
+  "https://github.com/mizufinance/poseidon377",
   "https://github.com/paradigmxyz/reth",
   "https://github.com/sigp/discv5",
 ]

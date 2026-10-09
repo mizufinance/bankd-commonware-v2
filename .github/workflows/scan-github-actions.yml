@@ -5,41 +5,45 @@ on:
     paths:
       - ".github/**"
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - ".github/**"
-  schedule:
-    - cron: "17 9 * * 1"
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  benchmark-helpers:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+  scan:
+    name: Scan GitHub Actions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
-
+      - uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      - name: Install actionlint
+        run: |
+          curl -fsSL --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c
+          sudo tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C /usr/local/bin actionlint
+      - name: Check workflow syntax
+        run: actionlint
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          inputs: .github/workflows .github/actions
+          advanced-security: false
+          version: v1.30.1
       - name: Test CI helpers
         run: |
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
           bash .github/scripts/bench-state-test.sh
           bash .github/scripts/bench-upload-charts-test.sh
-          node --test .github/scripts/docker-pr.test.js
-          node --test .github/scripts/docker-pr-status.test.js
-
-  scan:
-    name: Scan GitHub Actions
-    if: ${{ github.event_name != 'schedule' || github.repository == 'tempoxyz/tempo' }}
-    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
-    permissions:
-      id-token: write
-      actions: read
-      contents: read
+          node --test .github/scripts/docker-pr.test.js .github/scripts/docker-pr-status.test.js .github/scripts/bench-log-summary.test.js

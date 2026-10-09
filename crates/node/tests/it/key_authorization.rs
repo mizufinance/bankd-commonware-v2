@@ -7,7 +7,7 @@ use alloy::{
 use alloy_eips::Encodable2718;
 use alloy_primitives::TxKind;
 use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
-use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, ITIP20};
+use tempo_contracts::precompiles::DEFAULT_FEE_TOKEN;
 use tempo_primitives::{
     TempoTransaction, TempoTxEnvelope,
     transaction::{
@@ -69,7 +69,7 @@ fn build_create_key_auth_tx(
 /// Post-T1B: the same CREATE+KeyAuth tx that causes DoS/fee-drain on pre-T1B
 /// works correctly. The precompile runs with unlimited gas → no OOG →
 /// `evm.initial_gas` is never set to `u64::MAX` → block produces normally.
-/// Nonce is bumped and fees are burned, so replay is rejected.
+/// Nonce is bumped and native fees are charged, so replay is rejected.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_post_t1b_keyauth_oog_fixed() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -83,10 +83,7 @@ async fn test_post_t1b_keyauth_oog_fixed() -> eyre::Result<()> {
     let chain_id = provider.get_chain_id().await?;
     let nonce = provider.get_transaction_count(signer_addr).await?;
 
-    let balance_before = ITIP20::new(DEFAULT_FEE_TOKEN, &provider)
-        .balanceOf(signer_addr)
-        .call()
-        .await?;
+    let balance_before = provider.get_balance(signer_addr).await?;
 
     // Same gas_limit that triggers OOG on pre-T1B. On T1B+ the precompile
     // runs with unlimited gas so it never OOGs.
@@ -103,14 +100,11 @@ async fn test_post_t1b_keyauth_oog_fixed() -> eyre::Result<()> {
     // Block MUST be produced.
     setup.node.advance_block().await?;
 
-    // Fees burned.
-    let balance_after = ITIP20::new(DEFAULT_FEE_TOKEN, &provider)
-        .balanceOf(signer_addr)
-        .call()
-        .await?;
+    // Native BRL fees are charged even when execution fails.
+    let balance_after = provider.get_balance(signer_addr).await?;
     assert!(
         balance_after < balance_before,
-        "Post-T1B: fees must be burned"
+        "Post-T1B: native fees must be charged"
     );
 
     // Nonce bumped — make_create_frame reached, CREATE address consumed.

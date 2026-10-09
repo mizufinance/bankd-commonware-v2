@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 // Execute the workflow's inline dispatcher without checking out or running PR code.
-const yaml = fs.readFileSync(path.join(__dirname, '../workflows/docker-pr.yml'), 'utf8');
+const yaml = fs.readFileSync(path.join(__dirname, '../disabled-workflows/docker-pr.yml'), 'utf8');
 function scriptFor(name) {
   const step = yaml.split(`      - name: ${name}\n`)[1].split('\n      - name: ')[0].split('\n  acknowledge:')[0];
   return step.split('          script: |\n')[1].split('\n')
@@ -33,7 +33,7 @@ for (const [workflow, prefix] of [
   ['docker-profiling.yml', 'docker-profiling-build'],
 ]) {
   test(`${workflow} preserves the supplied ref unless a PR number overrides it`, async () => {
-    const build = fs.readFileSync(path.join(__dirname, '../workflows', workflow), 'utf8');
+    const build = fs.readFileSync(path.join(__dirname, '../disabled-workflows', workflow), 'utf8');
     const step = build.split('      - name: Resolve build source\n')[1].split('\n      - name: ')[0];
     assert.ok(step.includes('BRANCH_NAME: ${{ github.head_ref || github.ref_name }}'));
     const script = step.split('          script: |\n')[1].split('\n')
@@ -62,7 +62,7 @@ for (const [workflow, prefix] of [
   });
 
   test(`${workflow} scopes cancellation to PR builds in its own namespace`, () => {
-    const build = fs.readFileSync(path.join(__dirname, '../workflows', workflow), 'utf8');
+    const build = fs.readFileSync(path.join(__dirname, '../disabled-workflows', workflow), 'utf8');
     const concurrency = build.split('\nconcurrency:\n')[1].split('\n\n')[0];
     // Pin the grouping contract: repeated PR requests (nightly included) share a
     // group; other PRs, profiling, and individual non-PR runs remain independent.

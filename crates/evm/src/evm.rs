@@ -1394,6 +1394,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "bankd: legacy storage-action replay omits native BRL balances and Compliance reads; parallel building is disabled"]
     fn test_tip20_full_evm_storage_actions() {
         for hardfork in TempoHardfork::VARIANTS {
             // skip pre-T5 hardforks to avoid clutter

@@ -5,7 +5,7 @@
 //! `0x77 || rlp([tx])` envelope ready for `eth_sendRawTransaction`. Keys come from shieldd's
 //! public test seed phrase, so this is for localnets only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy_rlp::{Encodable, Header};
 use anyhow::{Context, Result, anyhow};
@@ -15,7 +15,11 @@ use decaf377::Fr;
 use rand_core::OsRng;
 use shieldd_sdk_app::SUBSTORE_PREFIXES;
 use shieldd_sdk_asset::{Value, asset};
-use shieldd_sdk_keys::{Address, keys::Bip44Path, keys::SpendKey, test_keys};
+use shieldd_sdk_keys::{
+    Address,
+    keys::{Bip44Path, SpendKey},
+    test_keys,
+};
 use shieldd_sdk_mock_client::{
     ActionIntent, MockClient, TransactionIntent, TransferIntent, WithdrawalIntent,
 };
@@ -178,8 +182,8 @@ fn brl_id() -> asset::Id {
         .id()
 }
 
-async fn sync(sk: &SpendKey, db: &PathBuf) -> Result<(MockClient, Storage)> {
-    let storage = Storage::load(db.clone(), SUBSTORE_PREFIXES.to_vec())
+async fn sync(sk: &SpendKey, db: &Path) -> Result<(MockClient, Storage)> {
+    let storage = Storage::load(db.to_path_buf(), SUBSTORE_PREFIXES.to_vec())
         .await
         .with_context(|| format!("open shieldd checkpoint {}", db.display()))?;
     let client = MockClient::new(sk.clone())

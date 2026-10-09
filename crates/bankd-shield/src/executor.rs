@@ -117,7 +117,7 @@ impl TxOutcome {
     /// `(recipient, amount)` for every plain transfer withdrawal of `denom`. Execution
     /// withdrawals and other denoms are left out (the host has no handler for them yet).
     pub fn transfers(&self, denom: &str) -> Vec<(String, u128)> {
-        let TxOutcome::Accepted { withdrawals } = self else {
+        let Self::Accepted { withdrawals } = self else {
             return Vec::new();
         };
         withdrawals
@@ -221,15 +221,24 @@ pub struct ShieldExecutor {
     tip_root: B256,
     pending: HashMap<B256, Pending>,
     open: Option<Open>,
-    // Always `Some` until drop. Shut down in the background on drop, since a plain drop
-    // panics when the node drops us from inside its async runtime.
+    // Always `Some` until drop. Shutdown must release background snapshots before the
+    // same database can be reopened, including when called from another async runtime.
     runtime: Option<Runtime>,
 }
 
 impl Drop for ShieldExecutor {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| drop(runtime))
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                });
+            } else {
+                drop(runtime);
+            }
         }
     }
 }
@@ -821,12 +830,17 @@ mod tests {
 
     #[test]
     fn calls_work_inside_another_tokio_runtime() {
-        let (_dir, mut exec) = fresh();
+        let (dir, mut exec) = fresh();
         let outer = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let root = outer.block_on(async { run(&mut exec, B256::ZERO, 1, 1) });
-        assert_eq!(exec.finalize(root, 1).unwrap(), root);
+        outer.block_on(async {
+            let root = run(&mut exec, B256::ZERO, 1, 1);
+            assert_eq!(exec.finalize(root, 1).unwrap(), root);
+            drop(exec);
+            let reopened = ShieldExecutor::open(dir.path()).unwrap();
+            assert_eq!(reopened.committed(), Some((1, root)));
+        });
     }
 
     #[test]

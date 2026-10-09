@@ -25,6 +25,7 @@ use tempo_primitives::{
 };
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: asserts TIP-20 fee settlement and validator distribution; gas is native BRL"]
 async fn test_set_user_token() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -224,6 +225,7 @@ async fn test_set_validator_token() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "bankd: requires TIP-20 funds and AMM liquidity to pay gas; gas is native BRL"]
 async fn test_fee_token_tx() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -375,10 +377,7 @@ async fn test_fee_payer_tx() -> eyre::Result<()> {
             .is_zero()
     );
 
-    let balance_before = ITIP20::new(fee_payer_token, provider.clone())
-        .balanceOf(fee_payer.address())
-        .call()
-        .await?;
+    let balance_before = provider.get_balance(fee_payer.address()).await?;
 
     let tx_hash = provider
         .send_raw_transaction(&tx.encoded_2718())
@@ -392,15 +391,13 @@ async fn test_fee_payer_tx() -> eyre::Result<()> {
 
     assert!(receipt.status());
 
-    let balance_after = ITIP20::new(fee_payer_token, &provider)
-        .balanceOf(fee_payer.address())
-        .call()
-        .await?;
+    let balance_after = provider.get_balance(fee_payer.address()).await?;
 
     assert_eq!(
         balance_after,
-        balance_before - calc_gas_balance_spending(receipt.gas_used, receipt.effective_gas_price())
+        balance_before - U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price())
     );
+    assert_eq!(provider.get_balance(user.address()).await?, U256::ZERO);
 
     Ok(())
 }
