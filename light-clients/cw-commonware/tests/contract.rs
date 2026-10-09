@@ -3,10 +3,11 @@
 use cosmwasm_std::{
     from_json,
     testing::{message_info, mock_dependencies, mock_env, MockApi},
-    to_json_vec, Binary, OwnedDeps, Storage,
+    to_json_vec, Binary, Order, OwnedDeps, Storage,
 };
 use cw_commonware::{
     contract::{instantiate, query, sudo},
+    header::TempoHeader,
     membership::account_from_proof,
     msg::*,
     state,
@@ -73,6 +74,20 @@ fn update(deps: &mut Deps, f: &Value, i: usize) -> Result<UpdateStateResult, Err
     )?;
     let res = sudo(deps.as_mut(), mock_env(), SudoMsg::UpdateState(m))?;
     Ok(from_json(res.data.unwrap()).unwrap())
+}
+
+fn check_for_misbehaviour(deps: &Deps, m: ClientMessageMsg) -> Result<bool, Error> {
+    let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+    let res = query(deps.as_ref(), mock_env(), QueryMsg::CheckForMisbehaviour(m));
+    // Successful and failing queries must leave the entire IBC store unchanged.
+    assert_eq!(
+        deps.storage
+            .range(None, None, Order::Ascending)
+            .collect::<Vec<_>>(),
+        before
+    );
+    let res: CheckForMisbehaviourResult = from_json(res?).unwrap();
+    Ok(res.found_misbehaviour)
 }
 
 fn proof(f: &Value, storage: &str) -> Binary {
@@ -143,22 +158,60 @@ fn updates_rotate_and_store_consensus() {
 
     // Replaying an update is a no-op, and not misbehaviour.
     assert_eq!(update(&mut deps, &f, 2).unwrap().heights, vec![height(12)]);
-    let r: CheckForMisbehaviourResult = from_json(
-        query(
-            deps.as_ref(),
-            mock_env(),
-            QueryMsg::CheckForMisbehaviour(header_msg(&f, 2)),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert!(!r.found_misbehaviour);
+    assert!(!check_for_misbehaviour(&deps, header_msg(&f, 2)).unwrap());
 
     // Epoch 0 headers are stale now.
     assert!(matches!(
         update(&mut deps, &f, 0),
         Err(Error::StaleEpoch { .. })
     ));
+}
+
+#[test]
+fn misbehaviour_requires_conflicting_consensus_at_header_height() {
+    let (mut deps, f) = setup();
+    assert!(state::consensus_state(&deps.storage, 3).unwrap().is_none());
+    assert!(!check_for_misbehaviour(&deps, header_msg(&f, 0)).unwrap());
+
+    update(&mut deps, &f, 0).unwrap();
+    let original = state::consensus_state(&deps.storage, 3).unwrap().unwrap();
+    assert!(!check_for_misbehaviour(&deps, header_msg(&f, 0)).unwrap());
+
+    // Model different previously stored consensus states, each based on the original.
+    let mut timestamp_conflict = original.clone();
+    timestamp_conflict.timestamp += 1;
+    let mut state_root_conflict = original.clone();
+    state_root_conflict.state_root.0[0] ^= 1;
+    for conflict in [timestamp_conflict, state_root_conflict] {
+        state::save_consensus_state(&mut deps.storage, 3, &conflict).unwrap();
+        assert!(check_for_misbehaviour(&deps, header_msg(&f, 0)).unwrap());
+    }
+}
+
+#[test]
+fn misbehaviour_verifies_header_before_comparing_consensus() {
+    let (mut deps, f) = setup();
+    update(&mut deps, &f, 0).unwrap();
+    let mut conflict = state::consensus_state(&deps.storage, 3).unwrap().unwrap();
+    conflict.timestamp += 1;
+    state::save_consensus_state(&mut deps.storage, 3, &conflict).unwrap();
+    assert!(check_for_misbehaviour(&deps, header_msg(&f, 0)).unwrap());
+
+    let mut header: Header = from_json(header_msg(&f, 0).client_message).unwrap();
+    let decoded = TempoHeader::decode(&header.header_rlp).unwrap();
+    let mut rlp = header.header_rlp.to_vec();
+    // Byte 20 is inside update 0's parent hash (bytes 18..50), outside TempoHeader's
+    // decoded fields.
+    rlp[20] ^= 1;
+    assert_eq!(TempoHeader::decode(&rlp).unwrap(), decoded);
+    header.header_rlp = rlp.into();
+    let invalid = ClientMessageMsg {
+        client_message: to_json_vec(&header).unwrap().into(),
+    };
+    assert_eq!(
+        check_for_misbehaviour(&deps, invalid).unwrap_err(),
+        Error::PayloadMismatch
+    );
 }
 
 #[test]
