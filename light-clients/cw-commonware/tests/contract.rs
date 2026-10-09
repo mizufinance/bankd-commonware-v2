@@ -3,7 +3,7 @@
 use cosmwasm_std::{
     from_json,
     testing::{message_info, mock_dependencies, mock_env, MockApi},
-    to_json_vec, Binary, OwnedDeps, Storage,
+    to_json_vec, Binary, Order, OwnedDeps, Storage,
 };
 use cw_commonware::{
     contract::{instantiate, query, sudo},
@@ -120,6 +120,16 @@ fn membership(f: &Value, value: Binary) -> SudoMsg {
     })
 }
 
+fn non_membership(f: &Value, storage: &str, key: &str) -> SudoMsg {
+    SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
+        height: height(3),
+        delay_time_period: 0,
+        delay_block_period: 0,
+        proof: proof(f, storage),
+        merkle_path: path(f, key),
+    })
+}
+
 #[test]
 fn updates_rotate_and_store_consensus() {
     let (mut deps, f) = setup();
@@ -194,13 +204,7 @@ fn membership_and_non_membership() {
     sudo(
         deps.as_mut(),
         mock_env(),
-        SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
-            height: height(3),
-            delay_time_period: 0,
-            delay_block_period: 0,
-            proof: proof(&f, "absentStorageProof"),
-            merkle_path: path(&f, "absentPath"),
-        }),
+        non_membership(&f, "absentStorageProof", "absentPath"),
     )
     .unwrap();
 
@@ -208,13 +212,7 @@ fn membership_and_non_membership() {
     let err = sudo(
         deps.as_mut(),
         mock_env(),
-        SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
-            height: height(3),
-            delay_time_period: 0,
-            delay_block_period: 0,
-            proof: proof(&f, "storageProof"),
-            merkle_path: path(&f, "commitmentPath"),
-        }),
+        non_membership(&f, "storageProof", "commitmentPath"),
     )
     .unwrap_err();
     assert!(matches!(err, Error::InvalidProof(_)), "{err}");
@@ -246,19 +244,134 @@ fn membership_and_non_membership_reject_invalid_path_lengths() {
             Error::InvalidPath
         );
 
-        let mut merkle_path = path(&f, "absentPath");
-        merkle_path.key_path.resize(path_len, Binary::default());
-        let m = SudoMsg::VerifyNonMembership(VerifyNonMembershipMsg {
-            height: height(3),
-            delay_time_period: 0,
-            delay_block_period: 0,
-            proof: proof(&f, "absentStorageProof"),
-            merkle_path,
-        });
+        let mut m = non_membership(&f, "absentStorageProof", "absentPath");
+        if let SudoMsg::VerifyNonMembership(ref mut v) = m {
+            v.merkle_path.key_path.resize(path_len, Binary::default());
+        }
         assert_eq!(
             sudo(deps.as_mut(), mock_env(), m).unwrap_err(),
             Error::InvalidPath
         );
+    }
+}
+
+#[test]
+fn membership_and_non_membership_check_height_before_proof() {
+    let (mut deps, f) = setup();
+    update(&mut deps, &f, 0).unwrap();
+
+    let value = hex::decode(s(&f["commitment"]).trim_start_matches("0x")).unwrap();
+    let messages = [
+        membership(&f, value.into()),
+        non_membership(&f, "absentStorageProof", "absentPath"),
+    ];
+    for m in &messages {
+        sudo(deps.as_mut(), mock_env(), m.clone()).unwrap();
+    }
+    let before: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+
+    for mut m in messages {
+        match &mut m {
+            SudoMsg::VerifyMembership(v) => v.proof = b"not JSON".as_slice().into(),
+            SudoMsg::VerifyNonMembership(v) => v.proof = b"not JSON".as_slice().into(),
+            _ => unreachable!(),
+        }
+        let err = sudo(deps.as_mut(), mock_env(), m.clone()).unwrap_err();
+        assert!(
+            matches!(err, Error::Decode(ref message) if !message.is_empty()),
+            "{err}"
+        );
+        assert_eq!(
+            deps.storage
+                .range(None, None, Order::Ascending)
+                .collect::<Vec<_>>(),
+            before
+        );
+
+        for (h, want) in [
+            (
+                Height {
+                    revision_number: 1,
+                    revision_height: 3,
+                },
+                Error::InvalidRevision,
+            ),
+            (height(4), Error::ConsensusStateNotFound(4)),
+        ] {
+            match &mut m {
+                SudoMsg::VerifyMembership(v) => v.height = h,
+                SudoMsg::VerifyNonMembership(v) => v.height = h,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                sudo(deps.as_mut(), mock_env(), m.clone()).unwrap_err(),
+                want
+            );
+            assert_eq!(
+                deps.storage
+                    .range(None, None, Order::Ascending)
+                    .collect::<Vec<_>>(),
+                before
+            );
+        }
+    }
+}
+
+#[test]
+fn membership_and_non_membership_reject_when_frozen() {
+    let (mut deps, f) = setup();
+    update(&mut deps, &f, 0).unwrap();
+
+    let value = hex::decode(s(&f["commitment"]).trim_start_matches("0x")).unwrap();
+    let messages = [
+        membership(&f, value.into()),
+        non_membership(&f, "absentStorageProof", "absentPath"),
+    ];
+    for m in &messages {
+        sudo(deps.as_mut(), mock_env(), m.clone()).unwrap();
+    }
+    sudo(
+        deps.as_mut(),
+        mock_env(),
+        SudoMsg::UpdateStateOnMisbehaviour(header_msg(&f, 1)),
+    )
+    .unwrap();
+    let frozen: Vec<_> = deps.storage.range(None, None, Order::Ascending).collect();
+
+    for m in messages {
+        for (h, malformed) in [
+            (height(3), false),
+            (
+                Height {
+                    revision_number: 1,
+                    revision_height: 3,
+                },
+                true,
+            ),
+            (height(4), true),
+            (height(3), true),
+        ] {
+            let mut m = m.clone();
+            let (message_height, proof) = match &mut m {
+                SudoMsg::VerifyMembership(v) => (&mut v.height, &mut v.proof),
+                SudoMsg::VerifyNonMembership(v) => (&mut v.height, &mut v.proof),
+                _ => unreachable!(),
+            };
+            *message_height = h;
+            if malformed {
+                *proof = b"not JSON".as_slice().into();
+            }
+            assert_eq!(
+                sudo(deps.as_mut(), mock_env(), m).unwrap_err(),
+                Error::Frozen
+            );
+            assert_eq!(
+                deps.storage
+                    .range(None, None, Order::Ascending)
+                    .collect::<Vec<_>>(),
+                frozen
+            );
+        }
     }
 }
 
