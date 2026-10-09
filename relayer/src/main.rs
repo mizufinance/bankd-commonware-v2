@@ -105,16 +105,8 @@ impl Chain {
         })
     }
 
-    async fn finalized_height(&self) -> eyre::Result<u64> {
-        let b: serde_json::Value = self
-            .provider
-            .raw_request("eth_getBlockByNumber".into(), ("finalized", false))
-            .await?;
-        hex_u64(&b["number"])
-    }
-
     async fn wait_finalized(&self, height: u64) -> eyre::Result<()> {
-        while self.finalized_height().await? < height {
+        while finalized_height(&self.provider).await? < height {
             tokio::time::sleep(POLL).await;
         }
         Ok(())
@@ -426,6 +418,13 @@ async fn relay_ack(src: &Chain, dst: &Chain, log: &Log) -> eyre::Result<()> {
     Ok(())
 }
 
+async fn finalized_height(provider: &impl Provider) -> eyre::Result<u64> {
+    let b: serde_json::Value = provider
+        .raw_request("eth_getBlockByNumber".into(), ("finalized", false))
+        .await?;
+    hex_u64(&b["number"])
+}
+
 fn hex_u64(v: &serde_json::Value) -> eyre::Result<u64> {
     let s = v
         .as_str()
@@ -433,14 +432,116 @@ fn hex_u64(v: &serde_json::Value) -> eyre::Result<u64> {
     Ok(u64::from_str_radix(s.trim_start_matches("0x"), 16)?)
 }
 
+#[cfg(test)]
+mod finalized_height_tests {
+    use std::{
+        num::{IntErrorKind, ParseIntError},
+        time::Duration,
+    };
+
+    use alloy::{
+        providers::{Provider, ProviderBuilder},
+        transports::{TransportError, mock::Asserter},
+    };
+    use serde_json::json;
+    use tokio::time::timeout;
+
+    use super::finalized_height;
+
+    #[tokio::test]
+    async fn parses_finalized_number() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+
+        for (number, expected) in [
+            ("0x0", 0),
+            ("0x2a", 42),
+            ("0xffffffffffffffff", u64::MAX),
+            ("2A", 42),
+            ("0x0x2a", 42),
+        ] {
+            asserter.push_success(&json!({ "number": number }));
+            let height = timeout(Duration::from_secs(1), finalized_height(&provider))
+                .await
+                .expect("finalized height request timed out")
+                .unwrap();
+            assert_eq!(height, expected, "number: {number}");
+        }
+    }
+
+    #[tokio::test]
+    async fn propagates_number_parse_errors() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+
+        for (number, expected) in [
+            ("0x", IntErrorKind::Empty),
+            ("0xgg", IntErrorKind::InvalidDigit),
+            ("0x10000000000000000", IntErrorKind::PosOverflow),
+        ] {
+            asserter.push_success(&json!({ "number": number }));
+            let error = timeout(Duration::from_secs(1), finalized_height(&provider))
+                .await
+                .expect("finalized height request timed out")
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<ParseIntError>().unwrap().kind(),
+                &expected,
+                "number: {number}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_null_and_non_string_numbers() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+
+        for (block, expected) in [
+            (json!({}), "expected hex quantity, got null"),
+            (json!(null), "expected hex quantity, got null"),
+            (json!({ "number": null }), "expected hex quantity, got null"),
+            (json!({ "number": 42 }), "expected hex quantity, got 42"),
+            (json!({ "number": true }), "expected hex quantity, got true"),
+        ] {
+            asserter.push_success(&block);
+            let error = timeout(Duration::from_secs(1), finalized_height(&provider))
+                .await
+                .expect("finalized height request timed out")
+                .unwrap_err();
+            assert_eq!(error.to_string(), expected, "block: {block}");
+        }
+    }
+
+    #[tokio::test]
+    async fn propagates_provider_failure_without_retry() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        asserter.push_failure_msg("finalized block unavailable");
+        asserter.push_success(&json!({ "number": "0x2a" }));
+
+        let error = timeout(Duration::from_secs(1), finalized_height(&provider))
+            .await
+            .expect("finalized height request timed out")
+            .unwrap_err();
+        let response = error
+            .downcast_ref::<TransportError>()
+            .unwrap()
+            .as_error_resp()
+            .unwrap();
+        assert_eq!(response.code, -32603);
+        assert_eq!(response.message, "finalized block unavailable");
+        assert_eq!(asserter.read_q().len(), 1);
+    }
+}
+
 /// Trusted epoch and group key for a new light client tracking the chain at `rpc`.
 /// Epoch 0's key is in genesis extra_data, later ones in the previous epoch's boundary header.
 async fn lc_init(rpc: &str, epoch_length: u64) -> eyre::Result<()> {
     let p = ProviderBuilder::new().connect(rpc).await?;
-    let fin: serde_json::Value = p
-        .raw_request("eth_getBlockByNumber".into(), ("finalized", false))
-        .await?;
-    let epoch = hex_u64(&fin["number"])? / epoch_length;
+    let epoch = finalized_height(&p).await? / epoch_length;
     let src = if epoch == 0 {
         0
     } else {
